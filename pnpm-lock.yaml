@@ -70,6 +70,7 @@ overrides:
   lodash-es: 4.18.1
   nanoid@3: 3.3.19
   node-abi: 4.35.0
+  onnxruntime-web: 1.31.1
   protobufjs@7: 7.6.6
   qs@6: 6.16.0
   tar: 7.5.22
@@ -373,8 +374,8 @@ importers:
         specifier: 'catalog:'
         version: 13.3.0(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
       onnxruntime-web:
-        specifier: 1.31.0-dev.20260914-8d85527a0
-        version: 1.31.0-dev.20260914-8d85527a0
+        specifier: 1.31.1
+        version: 1.31.1
       p-limit:
         specifier: ^7.3.2
         version: 7.3.2
@@ -6884,15 +6885,15 @@ packages:
   onnxruntime-common@1.30.0:
     resolution: {integrity: sha512-7fdVWjAID1dVhH/G8qK3APARunV4VkBFoCQAP7qp4Wkab0mrorvmc+sqiT+mKXOzDqdjN5j+/Z9nb4gzNPWcyA==}
 
-  onnxruntime-common@1.31.0-dev.20260911-2a43ec07e:
-    resolution: {integrity: sha512-gBuF6U32YErKIAt+yD7DeGBpjRxhJ1uJwako6ygjokSZULDU6Pd+KWComX8Tumk1hYVHRxjPj7mdMnD0ryAPOw==}
+  onnxruntime-common@1.31.1:
+    resolution: {integrity: sha512-F+nnYNiQtmNJ95V6R/isBJqiVpdANCrsMEg1OaF+Bkbl3GAtzWLR7Ng17Ld0QtYtYJyotOHPJzOQn1Y6PLZjpg==}
 
   onnxruntime-node@1.30.0:
     resolution: {integrity: sha512-twhs1C2C/BFkz1yc5OY0KIU2GUq6DURO7hD4bx5Q2Qy3nAMJwRXW8xU3NVczE29VA9lolLOYepoD8fjTGOfIqw==}
     os: [win32, darwin, linux]
 
-  onnxruntime-web@1.31.0-dev.20260914-8d85527a0:
-    resolution: {integrity: sha512-Iy7rtadoBgxS/LLvDr3QW38DB1PNXRnr0GJMcL0TAt7c9qjgVQl83UlGCVyeAnK2InpmW8Uc3PL8XIuqtDeF6g==}
+  onnxruntime-web@1.31.1:
+    resolution: {integrity: sha512-5GeH+bWQ+HxM10z7erGlsWqryrwMbSvm/1tkIsKTT48g0fI19VXVVC435t4t7VsPdSQeS7NmuZPXrQ73k82URw==}
 
   open@8.4.2:
     resolution: {integrity: sha512-7x81NCL719oNbsq/3mh+hVrAWmFuEYUqrq/Iw3kUzH8ReypT9QQ0BLoJS7/G9k6N81XjW4qHWtjWwe/9eLy1EQ==}
@@ -9470,7 +9471,7 @@ snapshots:
       '@huggingface/jinja': 0.5.10
       '@huggingface/tokenizers': 0.2.0
       onnxruntime-node: 1.30.0
-      onnxruntime-web: 1.31.0-dev.20260914-8d85527a0
+      onnxruntime-web: 1.31.1
       sharp: 0.35.4(@types/node@24.19.2)
     transitivePeerDependencies:
       - '@types/node'
@@ -14606,7 +14607,7 @@ snapshots:
 
   onnxruntime-common@1.30.0: {}
 
-  onnxruntime-common@1.31.0-dev.20260911-2a43ec07e: {}
+  onnxruntime-common@1.31.1: {}
 
   onnxruntime-node@1.30.0:
     dependencies:
@@ -14614,12 +14615,12 @@ snapshots:
       global-agent: 4.1.3
       onnxruntime-common: 1.30.0
 
-  onnxruntime-web@1.31.0-dev.20260914-8d85527a0:
+  onnxruntime-web@1.31.1:
     dependencies:
       flatbuffers: 25.9.23
       guid-typescript: 1.0.9
       long: 5.3.2
-      onnxruntime-common: 1.31.0-dev.20260911-2a43ec07e
+      onnxruntime-common: 1.31.1
       platform: 1.3.6
       protobufjs: 7.6.6
 

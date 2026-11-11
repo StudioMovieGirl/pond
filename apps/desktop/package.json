@@ -137,7 +137,7 @@
     "metascraper-url": "^5.56.2",
     "mime-types": "^3.0.2",
     "motion": "catalog:",
-    "onnxruntime-web": "1.31.0-dev.20260914-8d85527a0",
+    "onnxruntime-web": "1.31.1",
     "p-limit": "^7.3.2",
     "pdfjs-dist": "^6.3.289",
     "perfect-freehand": "^1.2.3",

@@ -19,8 +19,24 @@ function capWasmThreads(): void {
   /** Multi-threaded WASM needs cross-origin isolation AND SharedArrayBuffer; otherwise onnxruntime silently runs single-threaded. */
   wasmThreads = isolated && hasSAB ? Math.max(1, Math.floor(cores / 2)) : 1;
   try {
-    const wasm = env.backends.onnx.wasm;
+    const onnx = env.backends.onnx as {
+      versions?: { web?: string };
+      wasm?: {
+        numThreads?: number;
+        wasmPaths?: string | { mjs: string; wasm: string };
+      };
+    };
+    const wasm = onnx.wasm;
     if (wasm) wasm.numThreads = wasmThreads;
+    /** transformers.js defaults to the asyncify WASM build, which lacks the GatherBlockQuantized kernel the q4 EmbeddingGemma vision encoder needs; the standard build implements it. */
+    const webVersion = onnx.versions?.web;
+    if (wasm && webVersion) {
+      const prefix = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${webVersion}/dist/`;
+      wasm.wasmPaths = {
+        mjs: `${prefix}ort-wasm-simd-threaded.mjs`,
+        wasm: `${prefix}ort-wasm-simd-threaded.wasm`,
+      };
+    }
   } catch {}
   console.info(
     `[inference] wasm threads=${wasmThreads} (cores=${cores}, crossOriginIsolated=${isolated}, SharedArrayBuffer=${hasSAB})`,
