@@ -5,7 +5,18 @@ import {
   enrichmentSuspended,
 } from "@shared/machine-pace";
 import pLimit from "p-limit";
-import { enrichmentMonitor } from "@/features/enrichment/state/enrichment-monitor";
+import {
+  attachFailurePersistence,
+  enrichmentFailures,
+} from "@/features/enrichment/state/enrichment-failures";
+import {
+  type EnrichmentFailure,
+  enrichmentMonitor,
+} from "@/features/enrichment/state/enrichment-monitor";
+import {
+  createProgressTracker,
+  type ReconcileEntry,
+} from "@/features/enrichment/state/progress-tracker";
 import { onPoolDirty, pool, upsertSave } from "@/features/saves/pool";
 import type { Save } from "@/features/saves/types";
 import {
@@ -57,18 +68,11 @@ const enrichmentPreferenceAccess =
 /** Models are CPU/GPU heavy and share the UI renderer; one-at-a-time keeps the sweep from starving interactive work. */
 const limit = pLimit(1);
 const inflight = new Set<string>();
-const failed = new Set<string>();
-const failureRecords = new Map<
-  string,
-  {
-    key: string;
-    saveId: string;
-    title: string | null;
-    task: string;
-    reason: string;
-  }
->();
 const missingDuringSweep = new Set<string>();
+const progress = createProgressTracker();
+/** The task whose run is executing right now; null between runs. */
+let activeTask: string | null = null;
+let sessionDone = 0;
 
 export function isMissingMediaFailure(error: Error): boolean {
   if (error.message.startsWith("fetch failed (404)")) return true;
@@ -86,24 +90,28 @@ export function saveNeedsEnrichment(
   return !missingIds.has(save.id);
 }
 
+function failureRows(): EnrichmentFailure[] {
+  return enrichmentFailures.snapshot().map((row) => {
+    const index = row.key.indexOf(":");
+    return {
+      key: row.key,
+      saveId: index === -1 ? "" : row.key.slice(index + 1),
+      title: row.title,
+      task: index === -1 ? "" : row.key.slice(0, index),
+      reason: row.reason,
+    };
+  });
+}
+
 export async function refreshMissingOriginals(): Promise<ReadonlySet<string>> {
   const report = await window.pond.query("library.rescan", {});
   const missingOriginals = report.missingFiles;
   const ids = new Set(missingOriginals.map((save) => save.id));
-  const stale: string[] = [];
-  for (const key of failed) {
-    const saveId = key.slice(key.indexOf(":") + 1);
-    if (ids.has(saveId)) stale.push(key);
+  for (const id of ids) {
+    enrichmentFailures.clearForSaves([id]);
+    progress.removeSave(id);
   }
-  for (const key of stale) {
-    failed.delete(key);
-    failureRecords.delete(key);
-  }
-  enrichmentMonitor.set({
-    missingOriginals,
-    failedKeys: new Set(failed),
-    failures: [...failureRecords.values()],
-  });
+  publishActivity();
   return ids;
 }
 
@@ -111,51 +119,20 @@ function suspended(): boolean {
   return enrichmentSuspended(readMachinePace(), Date.now());
 }
 
-const stats = {
-  done: 0,
-  totalMs: 0,
-  byEnricher: new Map<string, { done: number; ms: number }>(),
-};
-
-function recordRun(enricher: Enricher, ms: number): void {
-  stats.done += 1;
-  stats.totalMs += ms;
-  const e = stats.byEnricher.get(enricher.id) ?? { done: 0, ms: 0 };
-  e.done += 1;
-  e.ms += ms;
-  stats.byEnricher.set(enricher.id, e);
-  if (stats.done % 10 === 0) {
-    const avg = Math.round(stats.totalMs / stats.done);
-    console.info(
-      `[enrichment] progress done=${stats.done} inflight=${inflight.size} avg=${avg}ms ` +
-        `last=${enricher.id} (${Math.round(ms)}ms)`,
-    );
-  }
-}
-
 function publishActivity(): void {
+  const rows = failureRows();
   enrichmentMonitor.set({
     inflight: inflight.size,
     activeKeys: new Set(inflight),
-    failedKeys: new Set(failed),
-    failures: [...failureRecords.values()],
+    activeTask,
+    failedKeys: new Set(rows.map((row) => row.key)),
+    failures: rows,
+    progress: progress.snapshot(inflight),
   });
 }
 
-function rememberFailure(
-  key: string,
-  save: Save,
-  task: string,
-  reason: string,
-): void {
-  failed.add(key);
-  failureRecords.set(key, {
-    key,
-    saveId: save.id,
-    title: save.title ?? null,
-    task,
-    reason,
-  });
+function rememberFailure(key: string, save: Save, reason: string): void {
+  enrichmentFailures.remember(key, save.title ?? null, reason);
 }
 
 function keyFor(enricher: Enricher, save: Save): string {
@@ -201,24 +178,16 @@ function dependenciesSatisfied(
   return true;
 }
 
-async function persist(enricher: Enricher, save: Save): Promise<void> {
+async function persist(enricher: Enricher, save: Save): Promise<boolean> {
   const result = await enrichmentPreferenceAccess.run(enricher, save);
-  if (result == null) {
-    rememberFailure(
-      keyFor(enricher, save),
-      save,
-      enricher.id,
-      "Couldn't finish",
-    );
-    return;
-  }
+  if (result == null) return false;
   const current = pool.get(save.id);
   /** Classification may still be running when the user corrects the Save. */
   if (
     enricher.id === "sensitive-content" &&
     isManualSensitiveDecision(current?.sensitiveModel)
   ) {
-    return;
+    return true;
   }
   if (result.optimistic) {
     if (current) upsertSave({ ...current, ...result.optimistic });
@@ -233,12 +202,13 @@ async function persist(enricher: Enricher, save: Save): Promise<void> {
       console.warn(`[enrichment] persist failed (${enricher.id})`, err);
     }
   }
+  return true;
 }
 
 function schedule(enricher: Enricher, save: Save): void {
   if (suspended() || missingDuringSweep.has(save.id)) return;
   const key = keyFor(enricher, save);
-  if (inflight.has(key) || failed.has(key)) return;
+  if (inflight.has(key) || enrichmentFailures.has(key)) return;
   inflight.add(key);
   publishActivity();
   void limit(async () => {
@@ -249,6 +219,7 @@ function schedule(enricher: Enricher, save: Save): void {
       suspended() ||
       missingDuringSweep.has(save.id) ||
       !current ||
+      enrichmentFailures.has(key) ||
       !enricher.enabled(prefs) ||
       !enrichmentPreferenceAccess.eligible(enricher, current, prefs) ||
       !dependenciesSatisfied(enricher, current, prefs)
@@ -258,11 +229,19 @@ function schedule(enricher: Enricher, save: Save): void {
       return;
     }
     const startedAt = performance.now();
+    activeTask = enricher.id;
+    progress.markStarted(enricher.id, Date.now());
     let elapsed = 0;
+    let outcome: "done" | "failed" | "missing" = "done";
+    let failureReason: string | null = null;
     try {
-      await persist(enricher, current);
+      if (!(await persist(enricher, current))) {
+        outcome = "failed";
+        failureReason = "Couldn't finish";
+      }
     } catch (err) {
       if (err instanceof Error && isMissingMediaFailure(err)) {
+        outcome = "missing";
         missingDuringSweep.add(save.id);
         const existing = enrichmentMonitor.snapshot().missingOriginals;
         if (!existing.some((item) => item.id === save.id)) {
@@ -274,17 +253,34 @@ function schedule(enricher: Enricher, save: Save): void {
           });
         }
       } else {
-        rememberFailure(
-          key,
-          current,
-          enricher.id,
-          err instanceof Error && err.message ? err.message : "Couldn't finish",
-        );
+        outcome = "failed";
+        failureReason =
+          err instanceof Error && err.message ? err.message : "Couldn't finish";
       }
-      console.warn(`[enrichment] ${enricher.id} failed for ${save.id}`, err);
     } finally {
       elapsed = performance.now() - startedAt;
-      recordRun(enricher, elapsed);
+      if (outcome === "failed") {
+        rememberFailure(key, current, failureReason ?? "Couldn't finish");
+        progress.markFailed(enricher.id, save.id);
+        console.warn(
+          `[enrichment] ${enricher.id} failed for ${save.id}`,
+          failureReason,
+        );
+      } else if (outcome === "done") {
+        sessionDone += 1;
+        progress.complete(enricher.id, save.id, elapsed, Date.now());
+        if (sessionDone % 10 === 0) {
+          const row = progress
+            .snapshot(inflight)
+            .find((item) => item.task === enricher.id);
+          console.info(
+            `[enrichment] progress done=${sessionDone} inflight=${inflight.size} ` +
+              `last=${enricher.id} (${Math.round(elapsed)}ms)` +
+              (row?.avgMs != null ? ` avg=${Math.round(row.avgMs)}ms` : ""),
+          );
+        }
+      }
+      /** A missing file leaves both sets until the next missing-file check reconciles it. */
       inflight.delete(key);
       publishActivity();
     }
@@ -295,10 +291,14 @@ function schedule(enricher: Enricher, save: Save): void {
 let mutationGeneration = 0;
 let lastFullScanGeneration = -1;
 
-async function scan(ids?: readonly string[]): Promise<void> {
+async function scan(
+  ids?: readonly string[],
+  tasks?: readonly string[],
+): Promise<void> {
   if (suspended()) return;
   const prefs = getPrefsSnapshot();
   const scope = ids && ids.length > 0 ? new Set(ids) : null;
+  const taskScope = tasks && tasks.length > 0 ? new Set(tasks) : null;
   let missingIds: ReadonlySet<string> = new Set(
     enrichmentMonitor.snapshot().missingOriginals.map((save) => save.id),
   );
@@ -313,72 +313,112 @@ async function scan(ids?: readonly string[]): Promise<void> {
     .filter((s) => !scope || scope.has(s.id))
     .filter((s) => saveNeedsEnrichment(s, missingIds))
     .sort((a, b) => b.savedAt - a.savedAt);
+  const entries: ReconcileEntry[] = [];
+  /** Every task the scan looked at, so a full scan also zeros tasks that turned off. */
+  const coveredTasks: string[] = [];
   const backlog: string[] = [];
   for (const enricher of ENRICHERS) {
+    if (taskScope && !taskScope.has(enricher.id)) continue;
+    coveredTasks.push(enricher.id);
     if (!enricher.enabled(prefs)) continue;
     let eligible = 0;
     for (const save of saves) {
-      if (!enrichmentPreferenceAccess.eligible(enricher, save, prefs)) continue;
+      const isEligible = enrichmentPreferenceAccess.eligible(
+        enricher,
+        save,
+        prefs,
+      );
+      const isFailed =
+        isEligible && enrichmentFailures.has(keyFor(enricher, save));
+      entries.push({
+        task: enricher.id,
+        saveId: save.id,
+        pending: isEligible && !isFailed,
+        failed: isFailed,
+      });
+      if (!isEligible || isFailed) continue;
       eligible += 1;
       if (!dependenciesSatisfied(enricher, save, prefs)) continue;
       schedule(enricher, save);
     }
     if (eligible > 0) backlog.push(`${enricher.id}=${eligible}`);
   }
+  progress.reconcile(entries, coveredTasks, scope == null);
   if (backlog.length > 0) {
     console.info(
       `[enrichment] scan backlog ${backlog.join(" ")} (inflight=${inflight.size})`,
     );
   }
+  publishActivity();
   if (!scope) lastFullScanGeneration = mutationGeneration;
 }
 
 let sweepStarted = false;
 let scanScheduled = false;
 let pendingScope: Set<string> | null = null;
+let pendingTasks: Set<string> | null = null;
 const FULL_SCAN_MS = 15 * 60_000;
 
-function scheduleScan(ids?: readonly string[]): void {
+function scheduleScan(
+  ids?: readonly string[],
+  tasks?: readonly string[],
+): void {
   const scoped = ids && ids.length > 0 ? ids : null;
+  const scopedTasks = tasks && tasks.length > 0 ? tasks : null;
   if (scanScheduled) {
     if (!scoped) pendingScope = null;
     else if (pendingScope !== null)
       for (const id of scoped) pendingScope.add(id);
+    if (!scopedTasks) pendingTasks = null;
+    else if (pendingTasks !== null)
+      for (const task of scopedTasks) pendingTasks.add(task);
     return;
   }
   scanScheduled = true;
   pendingScope = scoped ? new Set(scoped) : null;
+  pendingTasks = scopedTasks ? new Set(scopedTasks) : null;
   setTimeout(() => {
     void whenIdle().then(async () => {
       scanScheduled = false;
       const scope = pendingScope ? [...pendingScope] : undefined;
+      const taskScope = pendingTasks ? [...pendingTasks] : undefined;
       pendingScope = null;
-      await scan(scope);
+      pendingTasks = null;
+      await scan(scope, taskScope);
     });
   }, 250);
 }
 
+/**
+ * A full rescan of every enabled task. Clears the remembered failures, so a
+ * Retry button or a settings change re-attempts the saves that gave up.
+ */
 export function rescanEnrichment(ids?: readonly string[]): void {
-  if (ids && ids.length > 0) {
-    const scope = new Set(ids);
-    for (const key of failed) {
-      if (!scope.has(key.slice(key.indexOf(":") + 1))) continue;
-      failed.delete(key);
-      failureRecords.delete(key);
-    }
-    publishActivity();
-    scheduleScan(ids);
-    return;
-  }
-  failed.clear();
-  failureRecords.clear();
+  if (ids && ids.length > 0) enrichmentFailures.clearForSaves(ids);
+  else enrichmentFailures.clearAll();
   publishActivity();
-  scheduleScan();
+  scheduleScan(ids);
+}
+
+/**
+ * Run only the chosen tasks across the whole library. An explicit choice
+ * means the user wants these saves attempted, so the tasks' remembered
+ * failures are cleared first and the scan is scoped to the chosen tasks.
+ */
+export function scanLibraryTasks(tasks: readonly string[]): void {
+  const selected = [...new Set(tasks)].filter((task) =>
+    ENRICHERS_BY_ID.has(task),
+  );
+  if (selected.length === 0) return;
+  enrichmentFailures.clearForTasks(selected);
+  publishActivity();
+  scheduleScan(undefined, selected);
 }
 
 export function startEnrichmentSweep(): () => void {
   if (sweepStarted) return () => {};
   sweepStarted = true;
+  attachFailurePersistence();
   const hydrations = ENRICHERS.flatMap((e) =>
     e.hydrate
       ? [
@@ -396,6 +436,8 @@ export function startEnrichmentSweep(): () => void {
   });
   const detachDirty = onPoolDirty((ids) => {
     mutationGeneration += 1;
+    /** Changed content invalidates remembered failures for those Saves. */
+    enrichmentFailures.clearForSaves(ids);
     scheduleScan(ids);
   });
   const fullScanTimer = setInterval(() => {

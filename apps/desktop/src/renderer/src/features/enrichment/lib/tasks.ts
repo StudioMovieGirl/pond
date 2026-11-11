@@ -125,6 +125,26 @@ export function runEnrichment(): TaskResult {
   return { ok: true, message: "Enrichment sweep started." };
 }
 
+const SCAN_TASKS = { one: "task", other: "tasks" };
+
+/** Scan the whole library, but only for the chosen tasks. */
+export function scanLibraryTasks(tasks: readonly string[]): TaskResult {
+  const selected = [...new Set(tasks)].filter((task) => task.length > 0);
+  if (selected.length === 0) {
+    return { ok: false, message: "Choose a task to scan." };
+  }
+  void import("./sweep").then((sweep) => {
+    sweep.scanLibraryTasks(selected);
+  });
+  statusFeed.note(
+    `Scanning ${formatPlural(selected.length, SCAN_TASKS)} in the background`,
+  );
+  return {
+    ok: true,
+    message: `Scanning ${formatPlural(selected.length, SCAN_TASKS)} in the background.`,
+  };
+}
+
 async function reprocessStamped(
   enabled: boolean,
   disabledHint: string,

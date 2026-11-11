@@ -1,3 +1,4 @@
+import { DEFAULT_PREFS } from "@pond/schema";
 import { MotionConfig } from "motion/react";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -22,6 +23,7 @@ it("groups running tasks into one count with the breakdown on hover", async () =
         <MotionConfig reducedMotion="always">
           <ProcessingStatusCard
             enabled
+            ai={null}
             status={{
               inflight: 2,
               activeKeys: new Set(["caption:save-1", "ocr:save-1"]),
@@ -55,6 +57,7 @@ it("offers a retry once processing stops with failures", async () => {
       root.render(
         <ProcessingStatusCard
           enabled
+          ai={null}
           status={{
             inflight: 0,
             activeKeys: new Set(),
@@ -92,6 +95,7 @@ it("names a save whose files are missing and opens repair", async () => {
         <MotionConfig reducedMotion="always">
           <ProcessingStatusCard
             enabled
+            ai={null}
             status={{
               inflight: 0,
               activeKeys: new Set(),
@@ -140,6 +144,7 @@ it("prevents duplicate checks and recovers when starting a check fails", async (
       root.render(
         <ProcessingStatusCard
           enabled
+          ai={null}
           status={{ inflight: 0, activeKeys: new Set(), failedKeys: new Set() }}
           onCheck={() => {
             calls += 1;
@@ -176,6 +181,7 @@ it("keeps the check unavailable until preferences load and processing is enabled
         root.render(
           <ProcessingStatusCard
             enabled={false}
+            ai={null}
             loaded={loaded}
             status={{
               inflight: 0,
@@ -194,5 +200,116 @@ it("keeps the check unavailable until preferences load and processing is enabled
     }
   } finally {
     await act(async () => root.unmount());
+  }
+});
+
+it("counts stable items left with an estimate while the sweep runs", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  try {
+    await act(async () => {
+      root.render(
+        <ProcessingStatusCard
+          enabled
+          ai={{
+            ...DEFAULT_PREFS.ai,
+            mediaUnderstandingMode: "gemma4",
+            mediaUnderstandingProvider: "lmstudio",
+          }}
+          status={{
+            inflight: 3,
+            activeKeys: new Set([
+              "caption:save-1",
+              "caption:save-2",
+              "ocr:save-3",
+            ]),
+            activeTask: "caption",
+            failedKeys: new Set(["ocr:save-4"]),
+            failures: [
+              {
+                key: "ocr:save-4",
+                saveId: "save-4",
+                title: "Broken",
+                task: "ocr",
+                reason: "Local media understanding failed: model_unavailable",
+              },
+            ],
+            progress: [
+              {
+                task: "caption",
+                pending: 2,
+                inflight: 2,
+                failed: 0,
+                done: 5,
+                startedAt: Date.now() - 60_000,
+                totalRunMs: 10_000,
+                avgMs: 2_000,
+              },
+              {
+                task: "ocr",
+                pending: 1,
+                inflight: 1,
+                failed: 1,
+                done: 3,
+                startedAt: Date.now() - 30_000,
+                totalRunMs: 5_000,
+                avgMs: 2_000,
+              },
+            ],
+          }}
+          onCheck={async () => {}}
+          onRepair={() => {}}
+        />,
+      );
+    });
+    // Stable item count (pending, not the raw in-flight key set) plus estimate.
+    expect(host.textContent).toContain("3 items left");
+    expect(host.textContent).toContain("~6s to go");
+    // The running task names its backend in the breakdown.
+    expect(button(host, "Task Details")).toBeDefined();
+    expect(button(host, "Check Library")?.disabled).toBe(true);
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+  }
+});
+
+it("names failed runs in plain language from the sweep", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  try {
+    await act(async () => {
+      root.render(
+        <ProcessingStatusCard
+          enabled
+          ai={null}
+          status={{
+            inflight: 0,
+            activeKeys: new Set(),
+            failedKeys: new Set(["ocr:save-1"]),
+            failures: [
+              {
+                key: "ocr:save-1",
+                saveId: "save-1",
+                title: "Shot",
+                task: "ocr",
+                reason: "Local media understanding failed: model_unavailable",
+              },
+            ],
+          }}
+          onCheck={async () => {}}
+          onRepair={() => {}}
+        />,
+      );
+    });
+    expect(host.textContent).toContain(
+      "The selected local model is unavailable.",
+    );
+    expect(button(host, "Retry")).toBeDefined();
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
   }
 });

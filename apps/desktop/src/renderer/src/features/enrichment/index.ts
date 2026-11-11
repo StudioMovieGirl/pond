@@ -12,6 +12,7 @@ export {
   reocr,
   retranscribe,
   runEnrichment,
+  scanLibraryTasks,
   TASK_ENABLED,
   type TaskResult,
   type TaskScope,

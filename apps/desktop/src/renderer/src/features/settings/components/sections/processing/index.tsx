@@ -1,30 +1,29 @@
 import { IconCircleCheck, IconCircleWarning, IconPowerOff } from "@pond/icons";
+import type { Prefs } from "@pond/schema/db";
 import { Button, Loader, Settings, Tooltip } from "@pond/ui";
+import prettyMs from "pretty-ms";
 import { useEffect, useState } from "react";
 import {
   type EnrichmentFailure,
+  failureCopy,
   type MissingOriginal,
+  type TaskProgress,
+  taskBackend,
   useEnrichmentStatus,
 } from "@/features/enrichment/status";
 import { openLibraryRepair } from "@/features/library/repair";
-import { formatPlural } from "@/shared/lib/format";
+import { formatNumber, formatPlural } from "@/shared/lib/format";
 import { THIS_DEVICE } from "@/shared/lib/platform";
 import { usePrefs } from "@/shared/state/prefs";
 import styles from "./styles.module.css";
+import { SCAN_TASKS } from "./tasks-meta";
 
 const TASKS = { one: "task", other: "tasks" };
+const ITEMS = { one: "item", other: "items" };
 
-const TASK_LABELS = new Map<string, string>([
-  ["caption", "Image Captions"],
-  ["ocr", "Text in Images"],
-  ["transcript", "Transcription"],
-  ["clip", "Visual Similarity"],
-  ["aesthetic", "Style Labels"],
-  ["sensitive-content", "Sensitive Content"],
-  ["autoTitle", "Generated Titles"],
-  ["suggestedTags", "Suggested Tags"],
-  ["textEmbedding", "Semantic Search"],
-]);
+const TASK_LABELS = new Map(
+  SCAN_TASKS.map((task) => [task.id, task.label] as const),
+);
 
 interface TaskGroup {
   label: string;
@@ -103,10 +102,52 @@ function failureDetail(rows: readonly EnrichmentFailure[]): string {
   const described = rows
     .map((row) => {
       const task = TASK_LABELS.get(row.task) ?? row.task;
-      return `${saveLabel({ id: row.saveId, title: row.title })}: ${task}. ${row.reason}`;
+      return `${saveLabel({ id: row.saveId, title: row.title })}: ${task}. ${failureCopy(row.reason)}`;
     })
     .join(". ");
   return `${formatPlural(rows.length, TASKS)} couldn't finish. ${described}`;
+}
+
+interface ProgressRow {
+  label: string;
+  backend: string;
+  left: number;
+  failed: number;
+  estMs: number | null;
+  active: boolean;
+}
+
+/** Stable per-task counts from the sweep: what it found to do, what failed. */
+function progressRows(
+  progress: readonly TaskProgress[] | undefined,
+  ai: Prefs["ai"] | null,
+  activeTask: string | null,
+): ProgressRow[] {
+  if (!progress) return [];
+  return progress
+    .map((row) => ({
+      label: TASK_LABELS.get(row.task) ?? row.task,
+      backend: taskBackend(row.task, ai).chip,
+      left: row.pending,
+      failed: row.failed,
+      estMs:
+        row.avgMs != null && row.pending > 0 ? row.avgMs * row.pending : null,
+      active: row.inflight > 0 && row.task === activeTask,
+    }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+}
+
+function rowStatus(row: ProgressRow): string {
+  const parts: string[] = [];
+  if (row.left > 0) parts.push(`${formatNumber(row.left)} left`);
+  if (row.failed > 0) parts.push(`${formatNumber(row.failed)} failed`);
+  if (row.estMs != null) parts.push(`~${estimate(row.estMs)} to go`);
+  if (parts.length === 0) return "Up to date";
+  return parts.join(" · ");
+}
+
+function estimate(ms: number): string {
+  return prettyMs(Math.max(0, Math.round(ms)), { compact: true });
 }
 
 async function checkLibrary(): Promise<void> {
@@ -141,6 +182,7 @@ export function ProcessingStatus() {
   return (
     <ProcessingStatusCard
       status={status}
+      ai={ai}
       enabled={enabled}
       loaded={loaded}
       onCheck={checkLibrary}
@@ -151,6 +193,7 @@ export function ProcessingStatus() {
 
 export function ProcessingStatusCard({
   status,
+  ai,
   enabled,
   loaded = true,
   onCheck,
@@ -159,10 +202,13 @@ export function ProcessingStatusCard({
   status: {
     inflight: number;
     activeKeys: ReadonlySet<string>;
+    activeTask?: string | null;
     failedKeys: ReadonlySet<string>;
     failures?: readonly EnrichmentFailure[];
     missingOriginals?: readonly MissingOriginal[];
+    progress?: readonly TaskProgress[];
   };
+  ai: Prefs["ai"] | null;
   enabled: boolean;
   loaded?: boolean;
   onCheck: () => Promise<void>;
@@ -177,7 +223,13 @@ export function ProcessingStatusCard({
   );
   const busy = checking || status.inflight > 0;
   const attention = rows.length > 0 || missing.length > 0;
-  const groups = taskGroups(status.activeKeys, rows);
+  const groups = progressRows(status.progress, ai, status.activeTask ?? null);
+  const hasProgress = groups.length > 0;
+  const remaining = groups.reduce((sum, row) => sum + row.left, 0);
+  const remainingEstimate = groups.reduce(
+    (sum, row) => sum + (row.estMs ?? 0),
+    0,
+  );
   const state =
     !loaded || busy
       ? "processing"
@@ -204,7 +256,11 @@ export function ProcessingStatusCard({
     : checking
       ? "Looking for saves that need processing."
       : status.inflight > 0
-        ? `${formatPlural(status.inflight, TASKS)} left`
+        ? hasProgress
+          ? remainingEstimate > 0
+            ? `${formatPlural(remaining, ITEMS)} left · ~${estimate(remainingEstimate)} to go`
+            : `${formatPlural(remaining, ITEMS)} left`
+          : `${formatPlural(status.inflight, TASKS)} left`
         : checkFailed
           ? "Try checking the library again."
           : attention
@@ -253,21 +309,35 @@ export function ProcessingStatusCard({
           </Settings.ItemTitle>
           <p className={styles.detail}>
             <span>{detail}</span>
-            {groups.length > 0 ? (
+            {hasProgress || status.activeKeys.size > 0 || rows.length > 0 ? (
               <Tooltip.Info
                 side="top"
                 aria-label="Task Details"
                 label={
-                  <span className={styles.breakdown}>
-                    {groups.map((group) => (
-                      <span key={group.label} className={styles.group}>
-                        <span>{group.label}</span>
-                        <span className={styles.value}>
-                          {groupStatus(group)}
+                  hasProgress ? (
+                    <span className={styles.breakdown}>
+                      {groups.map((row) => (
+                        <span key={row.label} className={styles.group}>
+                          <span>
+                            {row.label}
+                            {row.active ? ` · ${row.backend}` : ""}
+                          </span>
+                          <span className={styles.value}>{rowStatus(row)}</span>
                         </span>
-                      </span>
-                    ))}
-                  </span>
+                      ))}
+                    </span>
+                  ) : (
+                    <span className={styles.breakdown}>
+                      {taskGroups(status.activeKeys, rows).map((group) => (
+                        <span key={group.label} className={styles.group}>
+                          <span>{group.label}</span>
+                          <span className={styles.value}>
+                            {groupStatus(group)}
+                          </span>
+                        </span>
+                      ))}
+                    </span>
+                  )
                 }
               />
             ) : null}

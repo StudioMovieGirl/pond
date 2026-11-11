@@ -1,5 +1,6 @@
 import { useSelector } from "@tanstack/react-store";
 import { Store } from "@tanstack/store";
+import type { TaskProgress } from "./progress-tracker";
 
 export interface EnrichmentFailure {
   key: string;
@@ -17,17 +18,23 @@ export interface MissingOriginal {
 interface EnrichmentStatus {
   inflight: number;
   activeKeys: ReadonlySet<string>;
+  /** Task whose run is executing right now (the sweep is one-at-a-time). */
+  activeTask: string | null;
   failedKeys: ReadonlySet<string>;
   failures: readonly EnrichmentFailure[];
   missingOriginals: readonly MissingOriginal[];
+  /** Per-task backlog, timing, and estimate; stable across scans and launches. */
+  progress: readonly TaskProgress[];
 }
 
 const store = new Store<EnrichmentStatus>({
   inflight: 0,
   activeKeys: new Set<string>(),
+  activeTask: null,
   failedKeys: new Set<string>(),
   failures: [],
   missingOriginals: [],
+  progress: [],
 });
 
 export const enrichmentMonitor = {

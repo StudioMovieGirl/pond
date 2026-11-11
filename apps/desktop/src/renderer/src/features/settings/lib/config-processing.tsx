@@ -2,6 +2,7 @@ import { Input, Settings } from "@pond/ui";
 import { useEffect, useId, useState } from "react";
 import { z } from "zod";
 import { ProcessingStatus } from "@/features/settings/components/sections/processing";
+import { ScanLibrary } from "@/features/settings/components/sections/processing/scan-library";
 import {
   type Binding,
   defineSection,
@@ -62,6 +63,10 @@ export const processingSection = defineSection("ai", {
   ],
   groups: [
     { title: "Processing Status", render: () => <ProcessingStatus /> },
+    {
+      title: "Scan Library",
+      render: () => <ScanLibrary />,
+    },
     {
       title: "Search",
       items: [
