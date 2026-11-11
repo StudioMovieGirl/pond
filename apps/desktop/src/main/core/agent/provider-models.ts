@@ -116,6 +116,7 @@ function idsFromResponse(
               capabilities: localCapabilities,
               architecture: z
                 .object({
+                  input_modalities: z.array(z.string()).catch([]),
                   output_modalities: z.array(z.string()).catch([]),
                 })
                 .optional()
@@ -131,7 +132,7 @@ function idsFromResponse(
     ? parsed.data.data.flatMap((row) => {
         if (!row?.id) return [];
         const capabilities = row.capabilities;
-        const localCapabilities =
+        let localCapabilities: DeclaredLocalModelCapabilities | undefined =
           capabilities && !Array.isArray(capabilities)
             ? {
                 text: capabilities.text,
@@ -141,6 +142,15 @@ function idsFromResponse(
                 trainedForToolUse: capabilities.trained_for_tool_use,
               }
             : capabilities;
+        // llama.cpp reports architecture modalities instead of a capabilities field.
+        if (!localCapabilities && row.architecture?.input_modalities.length) {
+          const inputs = row.architecture.input_modalities;
+          localCapabilities = {
+            text: inputs.includes("text"),
+            vision: inputs.includes("image"),
+            audio: inputs.includes("audio"),
+          };
+        }
         return [
           {
             id: row.id,

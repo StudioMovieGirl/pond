@@ -202,6 +202,50 @@ describe("modelsFromProviderResponse", () => {
       },
     ]);
   });
+
+  it("derives capabilities from llama.cpp input modalities when no capabilities field is present", () => {
+    expect(
+      modelsFromProviderResponse("lmstudio", {
+        data: [
+          {
+            id: "qwen38-vision",
+            architecture: {
+              input_modalities: ["text", "image"],
+              output_modalities: ["text"],
+            },
+          },
+          {
+            id: "qwen38",
+            architecture: {
+              input_modalities: ["text"],
+              output_modalities: ["text"],
+            },
+          },
+        ],
+      }),
+    ).toEqual([
+      {
+        id: "qwen38",
+        name: "qwen38",
+        modelCapabilities: {
+          text: true,
+          vision: false,
+          audio: false,
+          tools: false,
+        },
+      },
+      {
+        id: "qwen38-vision",
+        name: "qwen38-vision",
+        modelCapabilities: {
+          text: true,
+          vision: true,
+          audio: false,
+          tools: false,
+        },
+      },
+    ]);
+  });
 });
 
 describe("displayName", () => {
