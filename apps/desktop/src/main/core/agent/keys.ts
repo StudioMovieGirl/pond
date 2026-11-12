@@ -26,7 +26,11 @@ import { isLocalProviderConnected } from "./local-provider-state";
 import { catalogModelsForProvider, loadModelCatalog } from "./model-catalog";
 import { OPENCODE_GO_MODELS_BASE_URL } from "./opencode-go";
 import { OPENROUTER_KEY_URL, OPENROUTER_MODELS_URL } from "./openrouter";
-import { modelsFromProviderResponse } from "./provider-models";
+import {
+  declaredLocalModelCapabilities,
+  modelsFromProviderResponse,
+  SKIP,
+} from "./provider-models";
 
 const AGENT_PROVIDERS = ASSISTANT_MODELS.map((model) => model.id);
 export type AgentProviderId = AssistantProvider;
@@ -363,6 +367,142 @@ async function withOllamaModelDetails(
   );
 }
 
+// vLLM's /v1/models reports neither capabilities nor architecture (and
+// its server-info endpoints are not exposed by default), so the listing
+// alone never says whether a model accepts images. A 1-token chat
+// completion carrying a tiny inline image is the only signal the API
+// offers: a vision model counts the image in
+// usage.prompt_tokens_details.multimodal_tokens, while a text-only model
+// rejects the request.
+const VLLM_VISION_PROBE_IMAGE =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAF0lEQVR4nGP4z8BAEiJN9aiGUQ1DSgMAkPn/Afnh+ngAAAAASUVORK5CYII=";
+const VLLM_PROBE_TTL_MS = 30 * 60_000;
+const vllmVisionProbeCache = new Map<string, { vision: boolean; at: number }>();
+
+const vllmChatImageTokens = z
+  .object({
+    usage: z
+      .object({
+        prompt_tokens_details: z
+          .object({
+            multimodal_tokens: z.record(z.string(), z.number()),
+          })
+          .nullish(),
+      })
+      .nullish(),
+  })
+  .nullish();
+
+async function probeVllmVision(
+  chatUrl: string,
+  modelId: string,
+  headers: Record<string, string>,
+  signal: AbortSignal,
+  fetcher: typeof fetch,
+): Promise<boolean | undefined> {
+  try {
+    const response = await fetcher(chatUrl, {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({
+        model: modelId,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "What color is this square?" },
+              {
+                type: "image_url",
+                image_url: { url: VLLM_VISION_PROBE_IMAGE },
+              },
+            ],
+          },
+        ],
+        max_tokens: 1,
+        stream: false,
+      }),
+      signal,
+    });
+    if (!response.ok) {
+      // A 4xx means this model refused image input; a 5xx may be
+      // transient, so do not pin that outcome in the cache.
+      return response.status < 500 ? false : undefined;
+    }
+    const parsed = vllmChatImageTokens.safeParse(await response.json());
+    return (
+      (parsed?.data?.usage?.prompt_tokens_details?.multimodal_tokens?.image ??
+        0) > 0
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+const vllmProbeRow = z.object({
+  id: z.string().min(1).catch(""),
+  owned_by: z.string().catch(""),
+  capabilities: declaredLocalModelCapabilities.optional().catch(undefined),
+  architecture: z
+    .object({
+      input_modalities: z.array(z.string()).catch([]),
+    })
+    .optional()
+    .catch(undefined),
+});
+
+function vllmVisionProbeTarget(
+  row: JsonValue,
+): { id: string; record: Record<string, JsonValue> } | null {
+  const record = jsonObject.safeParse(row);
+  if (!record.success) return null;
+  const fields = vllmProbeRow.safeParse(record.data);
+  if (!fields.success) return null;
+  const { id, owned_by: ownedBy, capabilities, architecture } = fields.data;
+  if (ownedBy !== "vllm" || !id || SKIP.test(id)) return null;
+  // Rows that already declare capabilities or llama.cpp modalities are
+  // classified by modelsFromProviderResponse, so never probe them.
+  if (capabilities !== undefined) return null;
+  if (architecture?.input_modalities.length) return null;
+  return { id, record: record.data };
+}
+
+async function withVllmModelDetails(
+  rows: JsonValue[],
+  modelsUrl: string,
+  headers: Record<string, string>,
+  signal: AbortSignal,
+  fetcher: typeof fetch,
+  now: () => number = Date.now,
+): Promise<JsonValue[]> {
+  const targets = rows.map((row) => vllmVisionProbeTarget(row));
+  if (!targets.some((target) => target !== null)) return rows;
+  const chatUrl = modelsUrl.replace(/\/models\/?$/, "/chat/completions");
+  return Promise.all(
+    rows.map(async (row, index) => {
+      const target = targets[index];
+      if (!target) return row;
+      const stamp = now();
+      const cacheKey = `${chatUrl}::${target.id}`;
+      const cached = vllmVisionProbeCache.get(cacheKey);
+      if (cached && stamp - cached.at < VLLM_PROBE_TTL_MS) return row;
+      const vision = await probeVllmVision(
+        chatUrl,
+        target.id,
+        headers,
+        signal,
+        fetcher,
+      );
+      if (vision === undefined) return row;
+      if (vllmVisionProbeCache.size > 200) vllmVisionProbeCache.clear();
+      vllmVisionProbeCache.set(cacheKey, { vision, at: stamp });
+      return {
+        ...target.record,
+        capabilities: vision ? ["completion", "vision"] : ["completion"],
+      };
+    }),
+  );
+}
+
 export async function checkProviderKey(
   input: ProviderConnection,
   fetcher: typeof fetch = fetch,
@@ -513,7 +653,15 @@ export async function fetchProviderModels(
                   signal,
                   fetcher,
                 )
-              : rows;
+              : provider === "lmstudio"
+                ? await withVllmModelDetails(
+                    rows,
+                    endpoint,
+                    headers,
+                    signal,
+                    fetcher,
+                  )
+                : rows;
           return {
             ok: true,
             json:

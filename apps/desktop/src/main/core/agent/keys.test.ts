@@ -255,6 +255,176 @@ describe("complete model discovery", () => {
     });
   });
 
+  it("probes a vLLM model with a 1-token image completion and marks it vision", async () => {
+    const result = await fetchProviderModels(
+      { provider: "lmstudio", key: "", ...bases },
+      async (url, options) => {
+        if (String(url).endsWith("/v1/models")) {
+          return Response.json({
+            data: [{ id: "qwen3.8-27b", owned_by: "vllm" }],
+          });
+        }
+        if (String(url).endsWith("/v1/chat/completions")) {
+          const body = JSON.parse(String(options?.body));
+          expect(body.model).toBe("qwen3.8-27b");
+          expect(body.max_tokens).toBe(1);
+          expect(body.messages).toEqual([
+            {
+              role: "user",
+              content: [
+                { type: "text", text: "What color is this square?" },
+                {
+                  type: "image_url",
+                  image_url: expect.objectContaining({
+                    url: expect.stringMatching(/^data:image\/png;base64,/),
+                  }),
+                },
+              ],
+            },
+          ]);
+          return Response.json({
+            choices: [],
+            usage: {
+              prompt_tokens: 124,
+              total_tokens: 125,
+              completion_tokens: 1,
+              prompt_tokens_details: { multimodal_tokens: { image: 64 } },
+            },
+          });
+        }
+        throw new Error(`Unexpected request to ${url}`);
+      },
+    );
+    expect(result).toEqual({
+      ok: true,
+      json: {
+        data: [
+          {
+            id: "qwen3.8-27b",
+            owned_by: "vllm",
+            capabilities: ["completion", "vision"],
+          },
+        ],
+      },
+    });
+  });
+
+  it("keeps a vLLM model that never counts image tokens non-vision", async () => {
+    const result = await fetchProviderModels(
+      { provider: "lmstudio", key: "", ...bases },
+      async (url) => {
+        if (String(url).endsWith("/v1/models")) {
+          return Response.json({
+            data: [{ id: "text-model", owned_by: "vllm" }],
+          });
+        }
+        return Response.json({
+          choices: [],
+          usage: {
+            prompt_tokens: 8,
+            total_tokens: 9,
+            completion_tokens: 1,
+          },
+        });
+      },
+    );
+    expect(result).toEqual({
+      ok: true,
+      json: {
+        data: [
+          {
+            id: "text-model",
+            owned_by: "vllm",
+            capabilities: ["completion"],
+          },
+        ],
+      },
+    });
+  });
+
+  it("leaves a vLLM model unchanged when the vision probe fails with a server error", async () => {
+    const result = await fetchProviderModels(
+      { provider: "lmstudio", key: "", ...bases },
+      async (url) =>
+        String(url).endsWith("/v1/models")
+          ? Response.json({ data: [{ id: "flaky", owned_by: "vllm" }] })
+          : new Response(null, { status: 500 }),
+    );
+    expect(result).toEqual({
+      ok: true,
+      json: { data: [{ id: "flaky", owned_by: "vllm" }] },
+    });
+  });
+
+  it("does not probe vLLM models that already declare capabilities or modalities", async () => {
+    const result = await fetchProviderModels(
+      { provider: "lmstudio", key: "", ...bases },
+      async (url) => {
+        if (String(url).endsWith("/v1/models")) {
+          return Response.json({
+            data: [
+              { id: "declared", owned_by: "vllm", capabilities: ["vision"] },
+              {
+                id: "modalities",
+                owned_by: "vllm",
+                architecture: {
+                  input_modalities: ["text", "image"],
+                  output_modalities: ["text"],
+                },
+              },
+            ],
+          });
+        }
+        throw new Error(`Unexpected request to ${url}`);
+      },
+    );
+    expect(result).toEqual({
+      ok: true,
+      json: {
+        data: [
+          { id: "declared", owned_by: "vllm", capabilities: ["vision"] },
+          {
+            id: "modalities",
+            owned_by: "vllm",
+            architecture: {
+              input_modalities: ["text", "image"],
+              output_modalities: ["text"],
+            },
+          },
+        ],
+      },
+    });
+  });
+
+  it("caches vLLM vision probes so repeated listings do not re-probe", async () => {
+    let probes = 0;
+    const fetcher = async (url: RequestInfo | URL) => {
+      if (String(url).endsWith("/v1/models")) {
+        return Response.json({
+          data: [{ id: "probe-cached", owned_by: "vllm" }],
+        });
+      }
+      probes += 1;
+      return Response.json({
+        choices: [],
+        usage: {
+          prompt_tokens: 124,
+          total_tokens: 125,
+          completion_tokens: 1,
+          prompt_tokens_details: { multimodal_tokens: { image: 64 } },
+        },
+      });
+    };
+    for (let i = 0; i < 2; i++) {
+      const result = await fetchProviderModels(
+        { provider: "lmstudio", key: "", ...bases },
+        fetcher,
+      );
+      expect(result.ok).toBe(true);
+    }
+    expect(probes).toBe(1);
+  });
+
   it.each(["gemini", "anthropic"] as const)(
     "collects every %s page",
     async (provider) => {

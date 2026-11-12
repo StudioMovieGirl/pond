@@ -14,8 +14,22 @@ import {
 export type { ProviderModel } from "../../../shared/provider-models";
 export { displayName };
 
-const SKIP =
+export const SKIP =
   /embedding|whisper|tts|dall-e|davinci|babbage|moderation|realtime|transcribe|audio-|gpt-image|sora|computer-use|omni-moderation|text-embedding|codex-/i;
+
+// Shape of the capabilities field as local runtimes report it: Ollama
+// sends a token array, LM Studio sends a flag object.
+export const declaredLocalModelCapabilities = z.union([
+  z.array(z.string()),
+  z.object({
+    text: z.boolean().optional(),
+    vision: z.boolean().optional(),
+    audio: z.boolean().optional(),
+    tools: z.boolean().optional(),
+    tool_use: z.boolean().optional(),
+    trained_for_tool_use: z.boolean().optional(),
+  }),
+]);
 
 export function modelsFromProviderResponse(
   provider: AgentProviderId,
@@ -88,18 +102,7 @@ function idsFromResponse(
       return id ? [{ id, name: row.displayName }] : [];
     });
   }
-  const localCapabilities = z
-    .union([
-      z.array(z.string()),
-      z.object({
-        text: z.boolean().optional(),
-        vision: z.boolean().optional(),
-        audio: z.boolean().optional(),
-        tools: z.boolean().optional(),
-        tool_use: z.boolean().optional(),
-        trained_for_tool_use: z.boolean().optional(),
-      }),
-    ])
+  const localCapabilities = declaredLocalModelCapabilities
     .optional()
     .catch(undefined);
   const parsed = z
