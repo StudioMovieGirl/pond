@@ -81,6 +81,7 @@ export const TASK_DEFERRED_REASONS = [
   "source_paused",
   "queue_paused",
   "worker_capacity",
+  "auth_required",
 ] as const;
 export type TaskDeferredReason = (typeof TASK_DEFERRED_REASONS)[number];
 
@@ -110,6 +111,7 @@ export const SOURCE_GATE_REASONS = [
   "at_risk",
   "manual",
   "global_pause",
+  "auth_required",
 ] as const;
 export type SourceGateReason = (typeof SOURCE_GATE_REASONS)[number];
 
@@ -136,6 +138,21 @@ export interface ImageCrop {
   w: number;
   h: number;
 }
+
+/**
+ * Source ids removed on purpose.
+ * Automatic fetching treats these as already known; Fetch Older Saves does not.
+ */
+export const deletedSourceIds = sqliteTable(
+  "deleted_source_ids",
+  {
+    source: text("source").$type<Source>().notNull(),
+    sourceId: text("source_id").notNull(),
+  },
+  (t) => ({
+    pk: unique("deleted_source_ids_pk").on(t.source, t.sourceId),
+  }),
+);
 
 export const saves = sqliteTable(
   "saves",

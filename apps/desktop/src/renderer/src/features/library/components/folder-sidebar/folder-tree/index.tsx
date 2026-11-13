@@ -1,25 +1,11 @@
-import {
-  closestCenter,
-  DndContext,
-  type DragEndEvent,
-  type DragOverEvent,
-  DragOverlay,
-  KeyboardSensor,
-  PointerSensor,
-  useSensor,
-  useSensors,
-} from "@dnd-kit/core";
+import { DndContext, DragOverlay } from "@dnd-kit/core";
 import { restrictToVerticalAxis } from "@dnd-kit/modifiers";
-import {
-  SortableContext,
-  sortableKeyboardCoordinates,
-  verticalListSortingStrategy,
-} from "@dnd-kit/sortable";
+import { SortableContext } from "@dnd-kit/sortable";
 import { IconPlus, IconSortArrows } from "@pond/icons";
 import type { Folder } from "@pond/schema/db";
 import { Button, type MenuItemSpec, Sidebar } from "@pond/ui";
 import { useReducedMotionConfig } from "motion/react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { enterFolders } from "@/features/library/operations/enter-folder";
 import {
@@ -27,7 +13,6 @@ import {
   useRevealSidebarSection,
 } from "@/features/settings";
 import {
-  SIDEBAR_SORTABLE_KEYBOARD_CODES,
   SIDEBAR_SORTABLE_SCREEN_READER_INSTRUCTIONS,
   SORTABLE_DROP_ANIMATION,
 } from "@/shared/lib/dnd-kit";
@@ -41,6 +26,7 @@ import { useIncludeSubfolders } from "../../../state/view-store";
 import { folderIdsForExport } from "../../folder-context-menu";
 import { FolderCustomizeDialog } from "../../folder-customize-dialog";
 import { FolderToolsDialog } from "../../folder-tools";
+import { FOLDER_ROOT_DROP_ID } from "../folder-drop";
 import type { FolderListSort } from "../tree";
 import { FolderTreeRow } from "../tree-row";
 import { useFolderDragDrop } from "../use-folder-drag-drop";
@@ -49,14 +35,17 @@ import {
   useRevealFolderDrop,
 } from "../use-folder-tree-state";
 import { FolderDragPreview } from "./drag-preview";
-import { dndFolderDropKind, folderDndAnnouncements } from "./folder-dnd";
+import { folderCollisionDetection, staticFolderSorting } from "./folder-dnd";
 import { QuickAccess } from "./quick-access";
 import { quickAccessRows } from "./quick-access/order";
+import { FolderRootDrop } from "./root-drop";
+import styles from "./styles.module.css";
 import { useFolderTreeActions } from "./use-folder-tree-actions";
+import { useFolderTreeDrag } from "./use-folder-tree-drag";
 
 interface FolderTreeProps {
+  destination: LibraryNav | null;
   folderRows: Folder[];
-  libraryPage: boolean;
   nav: LibraryNav;
 }
 
@@ -88,7 +77,7 @@ function folderGroupMenuItems(
   ];
 }
 
-export function FolderTree({ folderRows, libraryPage, nav }: FolderTreeProps) {
+export function FolderTree({ destination, folderRows, nav }: FolderTreeProps) {
   const editingFolderId = useEditingFolderId();
   const [foldersOpen, setFoldersOpen] = useState(true);
   const [folderViews] = usePrefs("folderViews");
@@ -109,25 +98,14 @@ export function FolderTree({ folderRows, libraryPage, nav }: FolderTreeProps) {
   });
   const counts = useSidebarCounts();
   const tree = useFolderTreeState(folderRows);
-  const [activeFolderId, setActiveFolderId] = useState<string | null>(null);
-  const [keyboardDrag, setKeyboardDrag] = useState(false);
-  const pointerStartY = useRef<number | null>(null);
-  const pointerY = useRef<number | null>(null);
   const reduceMotion = useReducedMotionConfig();
-  const folderSensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
-    useSensor(KeyboardSensor, {
-      coordinateGetter: sortableKeyboardCoordinates,
-      keyboardCodes: SIDEBAR_SORTABLE_KEYBOARD_CODES,
-    }),
-  );
   function openSelectedFolders(ids: string[]) {
     enterFolders(ids, includeSubfolders);
   }
   const organization = useOrganizationTree(
     folderRows,
     openSelectedFolders,
-    nav,
+    destination,
   );
   const drag = useFolderDragDrop({
     selectedIds: organization.selected,
@@ -135,6 +113,12 @@ export function FolderTree({ folderRows, libraryPage, nav }: FolderTreeProps) {
     revealFolder: tree.revealFolder,
   });
   useRevealFolderDrop(drag.folderDrop, tree.revealFolder);
+  const treeDrag = useFolderTreeDrag({
+    drag,
+    folderRows,
+    visibleRows: tree.nested.map(({ folder }) => folder),
+  });
+  const activeFolderId = treeDrag.activeFolderId;
   const activeFolder = activeFolderId
     ? folderRows.find((folder) => folder.id === activeFolderId)
     : undefined;
@@ -151,42 +135,18 @@ export function FolderTree({ folderRows, libraryPage, nav }: FolderTreeProps) {
     ? (counts.folders[activeFolder.id] ?? 0)
     : 0;
 
+  // The inline editor mounts on the folder row, so a collapsed ancestor
+  // has to open before that row can be named.
   useEffect(() => {
-    if (editingFolderId) setFoldersOpen(true);
-  }, [editingFolderId]);
+    if (!editingFolderId) return;
+    setFoldersOpen(true);
+    const parentId = folders
+      .snapshot()
+      .find((folder) => folder.id === editingFolderId)?.parentId;
+    if (parentId) tree.revealFolder(parentId);
+  }, [editingFolderId, tree.revealFolder]);
   useRevealSidebarSection("folders", editingFolderId !== null);
 
-  function previewFolderDrop({ active, over }: DragOverEvent): void {
-    if (!over) {
-      drag.clearFolderDrop();
-      return;
-    }
-    const target = folderRows.find((folder) => folder.id === over.id);
-    if (!target) {
-      drag.clearFolderDrop();
-      return;
-    }
-    drag.previewFolderMove(
-      String(active.id),
-      target,
-      dndFolderDropKind(active, over, pointerY.current),
-    );
-  }
-
-  function finishFolderDrop({ active, over }: DragEndEvent): void {
-    setActiveFolderId(null);
-    setKeyboardDrag(false);
-    drag.clearFolderDrop();
-    const finalPointerY = pointerY.current;
-    pointerStartY.current = null;
-    pointerY.current = null;
-    if (!over) return;
-    const target = folderRows.find((folder) => folder.id === over.id);
-    if (!target) return;
-    const kind = dndFolderDropKind(active, over, finalPointerY);
-    if (!drag.folderMoveTarget(String(active.id), target, kind)) return;
-    void drag.moveFolder(String(active.id), target, kind);
-  }
   const customizingFolder = customizingFolderId
     ? folderRows.find((folder) => folder.id === customizingFolderId)
     : undefined;
@@ -202,11 +162,11 @@ export function FolderTree({ folderRows, libraryPage, nav }: FolderTreeProps) {
         folderDownloading={counts.foldersDownloading}
         badgeStyle={sidebar.badgeStyle}
         includeSubfolders={includeSubfolders}
-        libraryPage={libraryPage}
-        nav={nav}
+        destination={destination}
       />
       {sidebar.sections.folders ? (
         <Sidebar.CollapsibleGroup
+          className={styles.group}
           open={foldersOpen}
           onOpenChange={setFoldersOpen}
         >
@@ -239,39 +199,16 @@ export function FolderTree({ folderRows, libraryPage, nav }: FolderTreeProps) {
             accessibility={{
               screenReaderInstructions:
                 SIDEBAR_SORTABLE_SCREEN_READER_INSTRUCTIONS,
-              announcements: folderDndAnnouncements(folderRows, pointerY),
+              announcements: treeDrag.announcements,
             }}
-            collisionDetection={closestCenter}
+            collisionDetection={folderCollisionDetection}
             modifiers={[restrictToVerticalAxis]}
-            sensors={folderSensors}
-            onDragStart={({ active, activatorEvent }) => {
-              setActiveFolderId(String(active.id));
-              setKeyboardDrag(activatorEvent.type.startsWith("key"));
-              pointerStartY.current =
-                "clientY" in activatorEvent
-                  ? Number(activatorEvent.clientY)
-                  : null;
-              pointerY.current = pointerStartY.current;
-            }}
-            onDragMove={({ delta }) => {
-              pointerY.current =
-                pointerStartY.current == null
-                  ? null
-                  : pointerStartY.current + delta.y;
-            }}
-            onDragOver={previewFolderDrop}
-            onDragCancel={() => {
-              setActiveFolderId(null);
-              setKeyboardDrag(false);
-              drag.clearFolderDrop();
-              pointerStartY.current = null;
-              pointerY.current = null;
-            }}
-            onDragEnd={finishFolderDrop}
+            sensors={treeDrag.sensors}
+            {...treeDrag.handlers}
           >
             <SortableContext
               items={tree.nested.map(({ folder }) => folder.id)}
-              strategy={verticalListSortingStrategy}
+              strategy={staticFolderSorting}
             >
               <Sidebar.CollapsibleGroupContent
                 ref={organization.root}
@@ -281,12 +218,12 @@ export function FolderTree({ folderRows, libraryPage, nav }: FolderTreeProps) {
                 inert={!foldersOpen}
                 aria-hidden={!foldersOpen}
                 data-folder-drag={activeFolderId || undefined}
+                onPointerDownCapture={treeDrag.trackPointer}
               >
                 {tree.nested.map(({ folder, depth }) => {
                   const viewing =
-                    libraryPage &&
-                    nav.kind === "folder" &&
-                    nav.id === folder.id;
+                    destination?.kind === "folder" &&
+                    destination.id === folder.id;
                   const presentation = folderViews[folder.id];
                   const includeThisFolder = viewing
                     ? includeSubfolders
@@ -339,7 +276,10 @@ export function FolderTree({ folderRows, libraryPage, nav }: FolderTreeProps) {
                       )}
                       viewing={viewing}
                       dragHandlers={drag.handlersFor(folder)}
-                      dragging={activeFolderId === folder.id}
+                      dragging={
+                        activeFolderId === folder.id ||
+                        treeDrag.movingFolderId === folder.id
+                      }
                       coverSaveId={presentation?.coverSaveId}
                       onCreateFolder={(parentId) => void createFolder(parentId)}
                       onCustomize={() => setCustomizingFolderId(folder.id)}
@@ -357,10 +297,17 @@ export function FolderTree({ folderRows, libraryPage, nav }: FolderTreeProps) {
                 })}
               </Sidebar.CollapsibleGroupContent>
             </SortableContext>
+            <FolderRootDrop
+              target={drag.folderDrop?.id === FOLDER_ROOT_DROP_ID}
+            />
             {createPortal(
               <DragOverlay
                 dropAnimation={
-                  reduceMotion || keyboardDrag ? null : SORTABLE_DROP_ANIMATION
+                  reduceMotion ||
+                  treeDrag.keyboardDrag ||
+                  treeDrag.movingFolderId
+                    ? null
+                    : SORTABLE_DROP_ANIMATION
                 }
                 modifiers={[restrictToVerticalAxis]}
               >
@@ -378,9 +325,8 @@ export function FolderTree({ folderRows, libraryPage, nav }: FolderTreeProps) {
                         : undefined
                     }
                     active={
-                      libraryPage &&
-                      nav.kind === "folder" &&
-                      nav.id === activeFolder.id
+                      destination?.kind === "folder" &&
+                      destination.id === activeFolder.id
                     }
                     badgeStyle={sidebar.badgeStyle}
                     count={

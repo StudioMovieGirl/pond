@@ -3,11 +3,11 @@ import type { QueryResult } from "@shared/query-contracts";
 import { type CSSProperties, useEffect, useState } from "react";
 import { CardThumb } from "@/features/saves/components/card/media";
 import { Card } from "@/features/saves/components/card/parts";
-import { useSaves } from "@/features/saves/hooks/use-saves";
+import { useRetainedSaves, useSaves } from "@/features/saves/hooks/use-saves";
 import { ensureSaves } from "@/features/saves/lib/ensure-saves";
 import { openSave } from "@/features/saves/lib/save-nav";
 import { displayTitleForSave } from "@/features/saves/lib/text";
-import { aspectFor } from "@/features/saves/state/aspect";
+import { layoutAspectFor } from "@/features/saves/state/aspect";
 import type { Save } from "@/features/saves/types";
 import styles from "./styles.module.css";
 
@@ -24,7 +24,7 @@ interface FrameStyle extends CSSProperties {
 
 function RelatedCard({ item, save }: { item: RelatedItem; save: Save }) {
   const title = displayTitleForSave(save);
-  const aspect = aspectFor(save);
+  const aspect = layoutAspectFor(save);
   const frameStyle: FrameStyle = {
     "--frame-aspect": String(aspect),
     "--frame-width": `${Math.min(1, aspect) * 100}%`,
@@ -51,6 +51,7 @@ export function RelatedSaves({ saveId }: { saveId: string }) {
   const [items, setItems] = useState<RelatedItem[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  useRetainedSaves(items?.map((item) => item.id) ?? []);
 
   useEffect(() => {
     void attempt;

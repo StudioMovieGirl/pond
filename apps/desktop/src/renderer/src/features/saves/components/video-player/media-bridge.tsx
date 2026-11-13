@@ -1,10 +1,39 @@
 import { stepPlaybackRate, stepVolume, useVideo } from "@pond/ui";
 import { useHotkey } from "@tanstack/react-hotkeys";
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { useMediaSession } from "@/features/saves/hooks/use-media-session";
 import { viewerMemory } from "@/features/saves/lib/viewer-memory";
+import { useActiveVideo } from "@/features/saves/state/active-video";
 import { bindingKeys, useShortcutBindings } from "@/shared/lib/shortcuts";
-import { usePrefs } from "@/shared/state/prefs";
+import { patchPrefsSection, usePrefs } from "@/shared/state/prefs";
+
+const ARROW_KEY_OWNER = [
+  "input",
+  "textarea",
+  "select",
+  "button",
+  "a[href]",
+  "[contenteditable]:not([contenteditable='false'])",
+  "[role='button']",
+  "[role='combobox']",
+  "[role='listbox']",
+  "[role='menu']",
+  "[role='menuitem']",
+  "[role='option']",
+  "[role='searchbox']",
+  "[role='slider']",
+  "[role='spinbutton']",
+  "[role='tab']",
+  "[role='textbox']",
+].join(", ");
+
+/** Focused fields, sliders, and other controls keep arrow keys for themselves. */
+function controlOwnsArrowKeys(event: KeyboardEvent): boolean {
+  const owns = (node: EventTarget | null) =>
+    node instanceof Element && node.closest(ARROW_KEY_OWNER) != null;
+  if (owns(document.activeElement) || owns(event.target)) return true;
+  return event.composedPath().some((node) => owns(node));
+}
 
 export function MediaBridge({
   src,
@@ -23,7 +52,10 @@ export function MediaBridge({
   loopRange: [number, number] | null;
   loopOverride: boolean | null;
 }) {
-  const [prefs] = usePrefs("viewer");
+  const [prefs, , prefsReady] = usePrefs("viewer");
+  const applyingMute = useRef(false);
+  const videoMutedRef = useRef(prefs.videoMuted);
+  videoMutedRef.current = prefs.videoMuted;
   const shortcuts = useShortcutBindings();
   const lastSavedSecond = useRef(-1);
   const restored = useRef(false);
@@ -115,14 +147,17 @@ export function MediaBridge({
     () => actions.stepFrame(10),
     { enabled: active, ignoreInputs: true },
   );
-  useHotkey(bindingKeys(shortcuts, "viewer.seek-back"), () => seekBy(-10), {
-    enabled: active,
-    ignoreInputs: true,
-  });
-  useHotkey(bindingKeys(shortcuts, "viewer.seek-forward"), () => seekBy(10), {
-    enabled: active,
-    ignoreInputs: true,
-  });
+  useActiveVideo(active);
+  useHotkey(
+    bindingKeys(shortcuts, "viewer.seek-back"),
+    () => seekBy(-prefs.videoSeekSeconds),
+    { enabled: active, ignoreInputs: true, conflictBehavior: "allow" },
+  );
+  useHotkey(
+    bindingKeys(shortcuts, "viewer.seek-forward"),
+    () => seekBy(prefs.videoSeekSeconds),
+    { enabled: active, ignoreInputs: true, conflictBehavior: "allow" },
+  );
   const videoHotkeys = { enabled: active, ignoreInputs: true };
   useHotkey(
     bindingKeys(shortcuts, "viewer.speed-up"),
@@ -134,15 +169,39 @@ export function MediaBridge({
     () => actions.setRate(stepPlaybackRate(rate, -1)),
     videoHotkeys,
   );
+  const nudgeVolume = (delta: number) => {
+    const video = meta.videoRef.current;
+    if (!video) return;
+    const next = stepVolume(video.volume, delta);
+    // Raising the level while muted should be heard. Lowering it stays muted.
+    if (delta > 0 || !video.muted) actions.setVolume(next);
+    else video.volume = next;
+    actions.showControls();
+  };
+  const volumeHotkeys = {
+    enabled: active,
+    ignoreInputs: true,
+    conflictBehavior: "allow" as const,
+    preventDefault: false,
+    stopPropagation: false,
+  };
   useHotkey(
     bindingKeys(shortcuts, "viewer.volume-up"),
-    () => actions.setVolume(stepVolume(state.volume, 0.05)),
-    videoHotkeys,
+    (event) => {
+      if (event.defaultPrevented || controlOwnsArrowKeys(event)) return;
+      event.preventDefault();
+      nudgeVolume(0.05);
+    },
+    volumeHotkeys,
   );
   useHotkey(
     bindingKeys(shortcuts, "viewer.volume-down"),
-    () => actions.setVolume(stepVolume(state.volume, -0.05)),
-    videoHotkeys,
+    (event) => {
+      if (event.defaultPrevented || controlOwnsArrowKeys(event)) return;
+      event.preventDefault();
+      nudgeVolume(-0.05);
+    },
+    volumeHotkeys,
   );
 
   useMediaSession(
@@ -151,10 +210,31 @@ export function MediaBridge({
     { play, pause, seek, seekBy },
   );
 
+  // One viewer preference for every preview. Volume stays on the element.
+  // The M shortcut writes `muted` directly, so `volumechange` records it.
+  useLayoutEffect(() => {
+    const video = meta.video;
+    if (!prefsReady || !video || video.muted === prefs.videoMuted) return;
+    applyingMute.current = true;
+    video.muted = prefs.videoMuted;
+    applyingMute.current = false;
+  }, [meta.video, prefs.videoMuted, prefsReady]);
   useEffect(() => {
+    const video = meta.video;
+    if (!video) return;
+    const onVolumeChange = () => {
+      if (applyingMute.current || video.muted === videoMutedRef.current) return;
+      void patchPrefsSection("viewer", { videoMuted: video.muted });
+    };
+    video.addEventListener("volumechange", onVolumeChange);
+    return () => video.removeEventListener("volumechange", onVolumeChange);
+  }, [meta.video]);
+
+  useEffect(() => {
+    if (!prefsReady || !meta.video) return;
     if (active && prefs.autoplayVideo !== false) play();
     else pause();
-  }, [active, play, pause, prefs.autoplayVideo]);
+  }, [active, meta.video, play, pause, prefs.autoplayVideo, prefsReady]);
 
   return null;
 }

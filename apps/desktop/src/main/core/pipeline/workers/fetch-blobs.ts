@@ -14,7 +14,11 @@ import type { TransferOptions } from "../../../lib/download-transfer";
 import { probeImageDims, processImage } from "../../../lib/image-process";
 import { persistSave } from "../../persist-save";
 import { getImageDownloadPrefs, getVideoDownloadPrefs } from "../../prefs";
-import { ensureSaveThumbnail } from "../../save-thumbnail";
+import { isGithubGeneratedOpenGraph } from "../../refresh/harvest/github/open-graph";
+import {
+  ensureSaveThumbnail,
+  repairMismatchedThumbnail,
+} from "../../save-thumbnail";
 import { TerminalError, TransientError } from "../extractors/errors";
 import {
   QueueWorkerImageDimsSchema,
@@ -27,6 +31,8 @@ import { fetchSourceIcon } from "./source-icon";
 interface FetchBlobsContext extends TransferOptions {
   leaseToken?: string;
   cancellationFence?: number;
+  attempt?: number;
+  maxAttempts?: number;
 }
 
 export async function runFetchBlobs(
@@ -69,9 +75,10 @@ async function fetchMissingMedia(
   const missing = missingMediaUrls(urls, existingFiles);
   if (missing.length === 0) {
     log.debug(
-      "[pond pipeline:fetch-blobs] all media already on disk, skipping",
+      "[pond pipeline:fetch-blobs] all media already on disk, checking thumbnail",
       saveId,
     );
+    await repairMismatchedThumbnail(saveId, save);
     return;
   }
 
@@ -81,10 +88,37 @@ async function fetchMissingMedia(
     : null;
 
   const results = await fetchMediaBatch(missing, { imageMaxBytes, ...ctx });
-  const { fetched, transientMisses } = requireFetchedMedia(
-    results,
-    missing.length,
-  );
+  const settlement = settleMediaFetches(results, {
+    optionalGeneratedCard: save.source === "github",
+    finalAttempt:
+      ctx.attempt != null &&
+      ctx.maxAttempts != null &&
+      ctx.attempt >= ctx.maxAttempts,
+  });
+  if (settlement.generatedCardMissed) {
+    ctx.signal?.throwIfAborted();
+    try {
+      const { runRenderTextCover } = await import("./render-text-cover");
+      await runRenderTextCover(saveId, { imageFallback: true });
+    } catch (err) {
+      log.warn(
+        "[pond pipeline:fetch-blobs] text cover fallback failed",
+        saveId,
+        err,
+      );
+    }
+    log.debug(
+      "[pond pipeline:fetch-blobs] generated preview unavailable",
+      saveId,
+    );
+    return;
+  }
+  const { fetched, transientMisses } = settlement;
+  if (fetched.length === 0 && transientMisses > 0) {
+    throw new TransientError(
+      `fetch-blobs: ${transientMisses}/${missing.length} media still pending`,
+    );
+  }
 
   ctx.signal?.throwIfAborted();
   ctx.reportActivity?.({ phase: "processing" });
@@ -188,7 +222,8 @@ async function fetchMissingMedia(
     },
   );
   const saved = await readSave(saveId);
-  await ensureSaveThumbnail(saveId, saved, { force: replaceStale });
+  if (replaceStale) await ensureSaveThumbnail(saveId, saved, { force: true });
+  await repairMismatchedThumbnail(saveId, saved);
   log.info("[pond pipeline:fetch-blobs] wrote", {
     saveId,
     count: newFiles.length,
@@ -215,9 +250,7 @@ export function requireFetchedMedia(
   results: MediaBatchResults,
   requestedCount: number,
 ): FetchedMediaSummary {
-  const fetched = results.flatMap((result) =>
-    result.file ? [{ url: result.url, file: result.file }] : [],
-  );
+  const fetched = fetchedFiles(results);
   const transientMisses = results.filter(
     (result) => result.miss === "transient",
   ).length;
@@ -229,6 +262,64 @@ export function requireFetchedMedia(
   }
   throw new TerminalError(
     `fetch-blobs: ${requestedCount}/${requestedCount} media permanently unavailable`,
+  );
+}
+
+interface MediaFetchSettlement extends FetchedMediaSummary {
+  /** Every URL was GitHub's generated card, and none of them downloaded. */
+  generatedCardMissed: boolean;
+}
+
+/**
+ * A custom preview is required media. GitHub's generated card is retried
+ * when opengraph.githubassets.com rate-limits, and the last miss renders
+ * the text cover instead of failing the save.
+ */
+export function settleMediaFetches(
+  results: MediaBatchResults,
+  opts: { optionalGeneratedCard?: boolean; finalAttempt?: boolean } = {},
+): MediaFetchSettlement {
+  const optional = opts.optionalGeneratedCard === true;
+  const required = results.filter(
+    (result) => !optional || !isGithubGeneratedOpenGraph(result.url),
+  );
+  const generated = optional
+    ? results.filter((result) => isGithubGeneratedOpenGraph(result.url))
+    : [];
+  const generatedFetched = fetchedFiles(generated);
+  if (required.length === 0) {
+    if (generated.length === 0) {
+      const summary = requireFetchedMedia(results, results.length);
+      return { ...summary, generatedCardMissed: false };
+    }
+    if (generatedFetched.length > 0) {
+      return {
+        fetched: generatedFetched,
+        transientMisses: 0,
+        generatedCardMissed: false,
+      };
+    }
+    const transientMisses = generated.filter(
+      (result) => result.miss === "transient",
+    ).length;
+    if (transientMisses > 0 && opts.finalAttempt !== true) {
+      return { fetched: [], transientMisses, generatedCardMissed: false };
+    }
+    return { fetched: [], transientMisses: 0, generatedCardMissed: true };
+  }
+  const summary = requireFetchedMedia(required, required.length);
+  return {
+    fetched: [...summary.fetched, ...generatedFetched],
+    transientMisses: summary.transientMisses,
+    generatedCardMissed: false,
+  };
+}
+
+function fetchedFiles(
+  results: MediaBatchResults,
+): FetchedMediaSummary["fetched"] {
+  return results.flatMap((result) =>
+    result.file ? [{ url: result.url, file: result.file }] : [],
   );
 }
 

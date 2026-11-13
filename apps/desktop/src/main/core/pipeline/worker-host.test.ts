@@ -26,7 +26,10 @@ class FakeWorkerProcess implements QueueWorkerProcess {
     this.requests.push(request);
   }
 
+  killed = false;
+
   kill(): void {
+    this.killed = true;
     this.exitListener?.(1);
   }
 
@@ -49,8 +52,9 @@ class FakeWorkerProcess implements QueueWorkerProcess {
 
 function job(leaseToken: string) {
   return {
-    operation: "probe_image" as const,
-    bytes: new Uint8Array([1]),
+    operation: "build_poster" as const,
+    sourcePath: "/tmp/poster.mp4",
+    filename: "poster.jpg",
     leaseToken,
     cancellationFence: 0,
   };
@@ -74,6 +78,7 @@ it("replaces a dead worker and continues queued jobs", async () => {
   const second = host.run(job("second"));
   const third = host.run(job("third"));
 
+  await new Promise((resolve) => setTimeout(resolve, 0));
   expect(workers).toHaveLength(2);
   workers[0]?.exit(9);
   await expect(first).rejects.toThrow(
@@ -89,5 +94,127 @@ it("replaces a dead worker and continues queued jobs", async () => {
 
   await expect(second).resolves.toBeNull();
   await expect(third).resolves.toBeNull();
+  host.dispose();
+});
+
+it("keeps media when an image worker dies instead of failing the save", async () => {
+  const workers: FakeWorkerProcess[] = [];
+  const host = createQueueWorkerHost({
+    spawn: () => {
+      const worker = new FakeWorkerProcess();
+      workers.push(worker);
+      return worker;
+    },
+    createJobId: () => "job",
+    validateSourcePath: async () => true,
+    onStopped: () => {},
+  });
+
+  const image = host.run({
+    operation: "probe_image",
+    bytes: new Uint8Array([1]),
+    leaseToken: "image",
+    cancellationFence: 0,
+  });
+
+  workers[0]?.exit(139);
+  await expect(image).resolves.toBeNull();
+  host.dispose();
+});
+
+function idleHarness() {
+  const workers: FakeWorkerProcess[] = [];
+  const timers: Array<{ run: () => void; cancelled: boolean }> = [];
+  let nextJobId = 0;
+  const host = createQueueWorkerHost({
+    spawn: () => {
+      const worker = new FakeWorkerProcess();
+      workers.push(worker);
+      return worker;
+    },
+    createJobId: () => `job-${nextJobId++}`,
+    validateSourcePath: async () => true,
+    onStopped: () => {},
+    scheduleIdle: (run) => {
+      const timer = { run, cancelled: false };
+      timers.push(timer);
+      return () => {
+        timer.cancelled = true;
+      };
+    },
+  });
+  const fireIdle = () => {
+    for (const timer of timers.splice(0)) {
+      if (!timer.cancelled) timer.run();
+    }
+  };
+  const killed = () => workers.filter((worker) => worker.killed);
+  return { host, workers, killed, fireIdle };
+}
+
+it("stops an idle worker and spawns a fresh one for the next job", async () => {
+  const { host, workers, killed, fireIdle } = idleHarness();
+
+  const first = host.run(job("first"));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  workers[0]?.complete();
+  await expect(first).resolves.toBeNull();
+
+  fireIdle();
+  expect(killed()).toEqual([workers[0]]);
+
+  const second = host.run(job("second"));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(workers).toHaveLength(2);
+  workers[1]?.complete();
+  await expect(second).resolves.toBeNull();
+  host.dispose();
+});
+
+it("keeps a worker that receives a job before it goes idle", async () => {
+  const { host, workers, killed, fireIdle } = idleHarness();
+
+  const first = host.run(job("first"));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  workers[0]?.complete();
+  await expect(first).resolves.toBeNull();
+
+  const second = host.run(job("second"));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  fireIdle();
+  expect(killed()).toEqual([]);
+  expect(workers).toHaveLength(1);
+  expect(workers[0]?.requests).toHaveLength(2);
+  host.dispose();
+  await expect(second).rejects.toThrow("Queue worker host stopped.");
+});
+
+it("runs jobs in this process when spawning a worker would crash", async () => {
+  let spawned = 0;
+  const requests: QueueWorkerRequest[] = [];
+  const host = createQueueWorkerHost({
+    spawn: () => {
+      spawned += 1;
+      throw new Error("should not spawn");
+    },
+    createJobId: () => "inline-job",
+    validateSourcePath: async () => true,
+    onStopped: () => {},
+    execute: async (request) => {
+      requests.push(request);
+      return {
+        ok: true,
+        result: null,
+        jobId: request.jobId,
+        leaseToken: request.leaseToken,
+        cancellationFence: request.cancellationFence,
+      };
+    },
+  });
+
+  await expect(host.run(job("inline"))).resolves.toBeNull();
+  expect(spawned).toBe(0);
+  expect(requests).toHaveLength(1);
+  expect(requests[0]?.jobId).toBe("inline-job");
   host.dispose();
 });

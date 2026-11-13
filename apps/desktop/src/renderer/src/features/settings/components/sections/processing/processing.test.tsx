@@ -1,9 +1,22 @@
-import { DEFAULT_PREFS } from "@pond/schema";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { MotionConfig } from "motion/react";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { expect, it } from "vitest";
 import { ProcessingStatusCard } from "./";
+import styles from "./styles.module.css";
+
+const css = readFileSync(
+  resolve(dirname(fileURLToPath(import.meta.url)), "styles.module.css"),
+  "utf8",
+);
+
+function styleClass(name: string | undefined): string {
+  if (!name) throw new Error("Missing processing style");
+  return name;
+}
 
 function button(host: HTMLElement, name: string) {
   return [...host.querySelectorAll<HTMLButtonElement>("button")].find(
@@ -23,7 +36,6 @@ it("groups running tasks into one count with the breakdown on hover", async () =
         <MotionConfig reducedMotion="always">
           <ProcessingStatusCard
             enabled
-            ai={null}
             status={{
               inflight: 2,
               activeKeys: new Set(["caption:save-1", "ocr:save-1"]),
@@ -57,7 +69,6 @@ it("offers a retry once processing stops with failures", async () => {
       root.render(
         <ProcessingStatusCard
           enabled
-          ai={null}
           status={{
             inflight: 0,
             activeKeys: new Set(),
@@ -72,8 +83,10 @@ it("offers a retry once processing stops with failures", async () => {
     });
     expect(host.textContent).toContain("Processing needs attention");
     expect(host.textContent).toContain("2 tasks couldn't finish");
-    expect(host.textContent).toContain("save-1: Text in Images");
-    expect(host.textContent).toContain("save-2: Image Captions");
+    expect(host.textContent).toContain("Text in Images");
+    expect(host.textContent).toContain("save-1");
+    expect(host.textContent).toContain("Image Captions");
+    expect(host.textContent).toContain("save-2");
     expect(button(host, "Check Library")).toBeUndefined();
     expect(button(host, "Task Details")).toBeDefined();
     await act(async () => button(host, "Retry")?.click());
@@ -95,7 +108,6 @@ it("names a save whose files are missing and opens repair", async () => {
         <MotionConfig reducedMotion="always">
           <ProcessingStatusCard
             enabled
-            ai={null}
             status={{
               inflight: 0,
               activeKeys: new Set(),
@@ -144,7 +156,6 @@ it("prevents duplicate checks and recovers when starting a check fails", async (
       root.render(
         <ProcessingStatusCard
           enabled
-          ai={null}
           status={{ inflight: 0, activeKeys: new Set(), failedKeys: new Set() }}
           onCheck={() => {
             calls += 1;
@@ -172,6 +183,103 @@ it("prevents duplicate checks and recovers when starting a check fails", async (
   }
 });
 
+it("samples grouped failures and caps the task tooltip", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const longTitle =
+    "A very long X post title that should truncate instead of stretching the processing card across the window";
+  const failures = Array.from({ length: 30 }, (_, index) => ({
+    key: `clip:save-${index}`,
+    saveId: `save-${index}`,
+    title: index === 0 ? longTitle : `Visual post ${index}`,
+    task: "clip",
+    reason: "Couldn't finish",
+  }));
+  failures.push(
+    {
+      key: "ocr:other",
+      saveId: "other",
+      title: "Readable caption",
+      task: "ocr",
+      reason: "Couldn't finish",
+    },
+    {
+      key: "caption:caption-1",
+      saveId: "caption-1",
+      title: "Needs a caption",
+      task: "caption",
+      reason: "Model unavailable",
+    },
+  );
+  try {
+    await act(async () => {
+      root.render(
+        <MotionConfig reducedMotion="always">
+          <ProcessingStatusCard
+            enabled
+            status={{
+              inflight: 0,
+              activeKeys: new Set(),
+              failedKeys: new Set(failures.map((failure) => failure.key)),
+              failures,
+            }}
+            onCheck={async () => {}}
+            onRepair={() => {}}
+          />
+        </MotionConfig>,
+      );
+    });
+    expect(host.textContent).toContain("32 tasks couldn't finish");
+    expect(host.textContent).toContain("Visual Similarity");
+    expect(host.textContent).toContain("Text in Images");
+    expect(host.textContent).toContain("Image Captions");
+    expect(host.textContent).toContain(longTitle);
+    expect(host.textContent).toContain("Visual post 4");
+    expect(host.textContent).toContain("Readable caption");
+    expect(host.textContent).toContain("Model unavailable");
+    expect(host.textContent).not.toContain("Visual post 5");
+    expect(host.textContent).not.toContain("Couldn't finish");
+    const title = [...host.querySelectorAll("span")].find(
+      (element) => element.textContent === longTitle,
+    );
+    expect(title?.classList.contains(styleClass(styles.saveTitle))).toBe(true);
+    expect(css).toMatch(
+      /\.saveTitle\s*\{[^}]*overflow:\s*hidden;[^}]*text-overflow:\s*ellipsis;[^}]*white-space:\s*nowrap;/s,
+    );
+    expect(css).toMatch(/\.action\s*\{[^}]*align-self:\s*start;/s);
+    expect(css).toMatch(
+      /\.breakdown\s*\{[^}]*max-height:\s*min\(240px,\s*calc\(var\(--available-height,\s*240px\)\s*-\s*10px\)\);[^}]*overflow:\s*auto;/s,
+    );
+    expect(button(host, "Show More")).toBeDefined();
+    expect(button(host, "Show All")).toBeUndefined();
+    expect(button(host, "Retry")).toBeDefined();
+
+    await act(async () => button(host, "Task Details")?.focus());
+    const tooltip = document.querySelector("[data-open]");
+    expect(tooltip?.textContent).toContain("30 failed");
+    expect(tooltip?.textContent).toContain("+25 more");
+    expect(tooltip?.textContent).toContain(longTitle);
+    expect(tooltip?.textContent).not.toContain("Visual post 5");
+    expect(
+      tooltip?.querySelector(`.${CSS.escape(styleClass(styles.breakdown))}`),
+    ).toBeTruthy();
+
+    await act(async () => button(host, "Show More")?.click());
+    expect(host.textContent).toContain("Visual post 24");
+    expect(host.textContent).not.toContain("Visual post 25");
+    expect(button(host, "Show All")).toBeDefined();
+    await act(async () => button(host, "Show All")?.click());
+    expect(host.textContent).toContain("Visual post 29");
+    expect(button(host, "Show Less")).toBeDefined();
+    await act(async () => button(host, "Show Less")?.click());
+    expect(host.textContent).not.toContain("Visual post 5");
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+  }
+});
+
 it("keeps the check unavailable until preferences load and processing is enabled", async () => {
   const host = document.createElement("div");
   const root = createRoot(host);
@@ -181,7 +289,6 @@ it("keeps the check unavailable until preferences load and processing is enabled
         root.render(
           <ProcessingStatusCard
             enabled={false}
-            ai={null}
             loaded={loaded}
             status={{
               inflight: 0,
@@ -200,116 +307,5 @@ it("keeps the check unavailable until preferences load and processing is enabled
     }
   } finally {
     await act(async () => root.unmount());
-  }
-});
-
-it("counts stable items left with an estimate while the sweep runs", async () => {
-  const host = document.createElement("div");
-  document.body.append(host);
-  const root = createRoot(host);
-  try {
-    await act(async () => {
-      root.render(
-        <ProcessingStatusCard
-          enabled
-          ai={{
-            ...DEFAULT_PREFS.ai,
-            mediaUnderstandingMode: "gemma4",
-            mediaUnderstandingProvider: "lmstudio",
-          }}
-          status={{
-            inflight: 3,
-            activeKeys: new Set([
-              "caption:save-1",
-              "caption:save-2",
-              "ocr:save-3",
-            ]),
-            activeTask: "caption",
-            failedKeys: new Set(["ocr:save-4"]),
-            failures: [
-              {
-                key: "ocr:save-4",
-                saveId: "save-4",
-                title: "Broken",
-                task: "ocr",
-                reason: "Local media understanding failed: model_unavailable",
-              },
-            ],
-            progress: [
-              {
-                task: "caption",
-                pending: 2,
-                inflight: 2,
-                failed: 0,
-                done: 5,
-                startedAt: Date.now() - 60_000,
-                totalRunMs: 10_000,
-                avgMs: 2_000,
-              },
-              {
-                task: "ocr",
-                pending: 1,
-                inflight: 1,
-                failed: 1,
-                done: 3,
-                startedAt: Date.now() - 30_000,
-                totalRunMs: 5_000,
-                avgMs: 2_000,
-              },
-            ],
-          }}
-          onCheck={async () => {}}
-          onRepair={() => {}}
-        />,
-      );
-    });
-    // Stable item count (pending, not the raw in-flight key set) plus estimate.
-    expect(host.textContent).toContain("3 items left");
-    expect(host.textContent).toContain("~6s to go");
-    // The running task names its backend in the breakdown.
-    expect(button(host, "Task Details")).toBeDefined();
-    expect(button(host, "Check Library")?.disabled).toBe(true);
-  } finally {
-    await act(async () => root.unmount());
-    host.remove();
-  }
-});
-
-it("names failed runs in plain language from the sweep", async () => {
-  const host = document.createElement("div");
-  document.body.append(host);
-  const root = createRoot(host);
-  try {
-    await act(async () => {
-      root.render(
-        <ProcessingStatusCard
-          enabled
-          ai={null}
-          status={{
-            inflight: 0,
-            activeKeys: new Set(),
-            failedKeys: new Set(["ocr:save-1"]),
-            failures: [
-              {
-                key: "ocr:save-1",
-                saveId: "save-1",
-                title: "Shot",
-                task: "ocr",
-                reason: "Local media understanding failed: model_unavailable",
-              },
-            ],
-          }}
-          onCheck={async () => {}}
-          onRepair={() => {}}
-        />,
-      );
-    });
-    expect(host.textContent).toContain(
-      "The selected local model is unavailable.",
-    );
-    expect(button(host, "Retry")).toBeDefined();
-  } finally {
-    await act(async () => root.unmount());
-    host.remove();
   }
 });

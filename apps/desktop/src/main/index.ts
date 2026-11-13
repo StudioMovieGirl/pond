@@ -65,10 +65,15 @@ import { ensureIngestToken } from "./keychain";
 import { broadcast } from "./lib/broadcast";
 import { rotateBundleBackups } from "./lib/library-config";
 import { LibraryMetadataError } from "./lib/library-id";
+import { readLibraryPointer } from "./lib/library-pointer";
 import { disableMenuActionImages } from "./lib/menu-action-images";
 import { killTrackedProcessTrees } from "./lib/process-tree";
 import { RELAUNCH_ARG } from "./lib/relaunch";
-import { recoverUnreadableLibrary } from "./library-recovery";
+import { limitSharpMemory } from "./lib/sharp-memory";
+import {
+  recoverMissingLibrary,
+  recoverUnreadableLibrary,
+} from "./library-recovery";
 import {
   consoleLoggingEnabled,
   protocolRegistration,
@@ -118,6 +123,7 @@ markStartup("modules-loaded");
 /** Force app.name before any menu/dock work; dev falls back to "Electron" otherwise. */
 app.setName("Pond");
 disableMenuActionImages();
+limitSharpMemory();
 
 if (process.env.POND_SANDBOX) {
   const sandbox = resolvePath(process.env.POND_SANDBOX);
@@ -153,8 +159,11 @@ log.info("[pond] main starting", {
 });
 
 const wantsMcp = process.argv.includes("--mcp");
-/** Each MCP client spawns its own headless process, and none of them ever opens a window. */
-if (wantsMcp) app.dock?.hide();
+/** Each MCP client spawns its own headless process, and none of them ever opens a window, so none needs a GPU process. */
+if (wantsMcp) {
+  app.disableHardwareAcceleration();
+  app.dock?.hide();
+}
 const initialDeepLink = deepLinkArg(process.argv);
 
 let nativeServer: NetServer | null = null;
@@ -254,7 +263,7 @@ app.whenReady().then(async () => {
   if (!(await singleInstanceLock) || quitPreparing) return;
   started = true;
   markStartup("app-ready");
-  if (process.platform === "darwin" && !app.isPackaged) {
+  if (process.platform === "darwin" && !app.isPackaged && !wantsMcp) {
     const { applyAppIcon } = await import("./core/app-icon");
     await applyAppIcon(DEFAULT_APP_ICON);
   }
@@ -288,7 +297,7 @@ app.whenReady().then(async () => {
   installAppMenu({
     shortcuts: menuPrefs.shortcuts,
     focusedOrMain,
-    openLibraryWindow: () => void openLibraryWindow(),
+    openLibraryWindow,
   });
 
   ipcMain.on(IPC.menuRecents, (_event, entries: RecentMenuEntry[]) => {
@@ -341,6 +350,18 @@ app.whenReady().then(async () => {
 
 async function openActiveLibrary(): Promise<PondPaths | null> {
   try {
+    const pointer = readLibraryPointer();
+    if (pointer && !existsSync(pointer)) {
+      log.warn("[pond] Library is missing", pointer);
+      if (wantsMcp) {
+        app.exit(1);
+        return null;
+      }
+      if (!(await recoverMissingLibrary(pointer))) {
+        app.exit(0);
+        return null;
+      }
+    }
     ensureDefaultLibrary();
     return resolvePaths();
   } catch (error) {
@@ -364,6 +385,12 @@ async function postLaunchInit(): Promise<void> {
     .catch((err) =>
       log.warn("[pond] library displacement watch failed to start", err),
     );
+
+  if (process.platform === "darwin" && !process.env.POND_SANDBOX) {
+    void import("./core/library-folder-icon")
+      .then((module) => module.applyLibraryFolderIcon(libraryRoot()))
+      .catch((err) => log.warn("[pond] library folder icon failed", err));
+  }
 
   try {
     await syncLibraryRootMetadata();

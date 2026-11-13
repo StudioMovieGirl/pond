@@ -1,5 +1,5 @@
 import { Button } from "@pond/ui";
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import {
   FolderEmpty,
   LibraryEmpty,
@@ -24,12 +24,12 @@ import {
   clearSaveSelection,
   isLibraryBackgroundTarget,
   libraryViewContext,
+  SaveCollectionContextMenu,
   useCardActions,
 } from "@/features/saves";
 import { resultNavigation } from "@/features/saves/navigation";
 import { useSavePaging } from "@/features/saves/pool";
 import { MatchesEmpty } from "@/shared/components/matches-empty";
-import { SpecContextMenu } from "@/shared/components/spec-context-menu";
 import { buildEmptyGalleryMenu } from "./empty-gallery-menu";
 
 function LibraryEmptyState({
@@ -88,11 +88,22 @@ export function LibraryView() {
   const onEndReached = useCallback(() => {
     void data.paging.loadMore();
   }, [data.paging.loadMore]);
+  // A new scope clears its page before the first answer arrives. Publishing
+  // that empty list under the new key makes an open preview treat the Save as gone.
+  const publishedKey = useRef<string | null>(null);
 
   useEffect(() => {
+    const key = data.paging.queryKey;
+    const unsettled =
+      publishedKey.current !== key &&
+      data.paging.loading &&
+      data.filteredIds.length === 0 &&
+      !data.paging.settledEmpty;
+    if (unsettled) return;
+    publishedKey.current = key;
     libraryViewContext.set(data.filteredIds, data.mode);
     resultNavigation.setSource({
-      key: data.paging.queryKey,
+      key,
       total: data.paging.total,
       loadedIds: data.paging.loadedIds,
       ids: data.filteredIds,
@@ -104,21 +115,17 @@ export function LibraryView() {
     data.mode,
     data.paging.allIds,
     data.paging.loadMore,
+    data.paging.loading,
     data.paging.queryKey,
+    data.paging.settledEmpty,
     data.paging.total,
     data.paging.loadedIds,
   ]);
 
   return (
-    <SpecContextMenu
-      search
-      searchLabel="Search operations"
-      onOpen={(eventDetails) => {
-        if (!isLibraryBackgroundTarget(eventDetails.event?.target ?? null)) {
-          eventDetails.cancel();
-        }
-      }}
-      buildItems={buildEmptyGalleryMenu}
+    <SaveCollectionContextMenu
+      acceptsBackground={isLibraryBackgroundTarget}
+      buildBackgroundItems={buildEmptyGalleryMenu}
     >
       <LibraryGrid.Root
         data-library-grid=""
@@ -203,6 +210,6 @@ export function LibraryView() {
         ) : null}
         <HoverPreview />
       </LibraryGrid.Root>
-    </SpecContextMenu>
+    </SaveCollectionContextMenu>
   );
 }

@@ -5,6 +5,7 @@ import { tagOperations } from "@/features/tags/operations/tag-client";
 import type { TagGroupRow } from "@/features/tags/state/tag-groups";
 import type { TagRow } from "@/features/tags/state/tags";
 import { errorCopy } from "@/shared/lib/error-copy";
+import { placeCreateOptionLast } from "@/shared/lib/picker-order";
 import { parseTagBatch, partitionPickerTags } from "./lib";
 import type { CreateInfo, TagPickerRow, TagSection } from "./types";
 
@@ -12,7 +13,10 @@ interface TagMenuOptions {
   tags: readonly TagRow[];
   groups: readonly TagGroupRow[];
   appliedKeys: ReadonlySet<string> | undefined;
-  onToggle: (name: string) => void | Promise<void>;
+  onToggle: (
+    name: string,
+    options?: { created?: boolean },
+  ) => void | Promise<void>;
   allowCreate: boolean;
   recommendedNames: readonly string[];
   layout: "list" | "grid";
@@ -222,8 +226,8 @@ export function useTagMenu({
     return result;
   }, [collapsedGroups, groups, list, matching, needle, tags]);
 
-  const rows = useMemo<TagPickerRow[]>(() => {
-    const tagRows = list
+  const rows = useMemo<readonly TagPickerRow[]>(() => {
+    const tagRows: readonly TagPickerRow[] = list
       ? [...recommendedRows, ...listRows]
       : sections.flatMap((section) =>
           section.open
@@ -234,17 +238,19 @@ export function useTagMenu({
               }))
             : [],
         );
-    return createInfo
-      ? [
-          {
+    return placeCreateOptionLast(
+      tagRows,
+      createInfo
+        ? {
             id: `create-${createInfo.label}`,
-            kind: "create",
+            kind: "create" as const,
             create: createInfo,
-          },
-          ...tagRows,
-        ]
-      : tagRows;
+          }
+        : null,
+    );
   }, [createInfo, list, listRows, recommendedRows, sections]);
+  const lastRow = rows.at(-1);
+  const createRow = lastRow?.kind === "create" ? lastRow : null;
 
   async function commitCreate(info: CreateInfo) {
     if (creating) return;
@@ -255,14 +261,16 @@ export function useTagMenu({
       if (info.kind === "batch") {
         for (const item of info.labels) {
           const lower = item.toLowerCase();
-          if (!tagsByLower.has(lower)) await tagOperations.create("tag", item);
-          if (!appliedKeys?.has(lower)) await onToggle(item);
+          const existed = tagsByLower.has(lower);
+          if (!existed) await tagOperations.create("tag", item);
+          if (!appliedKeys?.has(lower))
+            await onToggle(item, { created: !existed });
         }
         setQuery("");
         return;
       }
-      if (!tagsByLower.has(label.toLowerCase()))
-        await tagOperations.create("tag", label);
+      const existed = tagsByLower.has(label.toLowerCase());
+      if (!existed) await tagOperations.create("tag", label);
       if (info.kind === "group") {
         const group = groups.find(
           (candidate) =>
@@ -271,7 +279,7 @@ export function useTagMenu({
         if (!group) await tagOperations.create("group", info.group);
         await tagOperations.addToGroup(label, group?.name ?? info.group);
       }
-      await onToggle(label);
+      await onToggle(label, { created: !existed });
       setQuery("");
     } catch (cause) {
       setError(errorCopy(cause, "Couldn't create the tag. Try again."));
@@ -330,6 +338,7 @@ export function useTagMenu({
     collapsedGroups,
     sections,
     createInfo,
+    createRow,
     recommendedRows,
     listRows,
     cursor,

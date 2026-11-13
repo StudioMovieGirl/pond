@@ -100,9 +100,9 @@ Settings pages share the default `Settings.Page` width and spacing; individual s
 
 Run `pnpm architecture:check` for runtime dependency cycles, process/shared-code boundaries, and feature entries. Type-only imports are excluded from the runtime graph. Run `pnpm check` for the required local code checks and offline tests, then `pnpm build` for bundles and performance budgets. Use `pnpm knip` separately when pruning; check non-TypeScript and dynamic entrypoints before accepting a deletion.
 
-Save previews can open in app-owned presentation and detached always-on-top windows. A dedicated sandboxed preload exposes only typed preview state, configuration, neighbor navigation, and close capabilities. Main validates the Save and image before creating a window, closes auxiliary windows during Library transitions and shutdown. The older `preview.pin`, `preview.configure`, and `preview.neighbor` command names remain removed rather than becoming an undocumented compatibility surface.
+Save previews can open in app-owned presentation and detached always-on-top windows. A dedicated sandboxed preload exposes only typed preview state, configuration, neighbor navigation, and close capabilities. In-app players and these windows share the viewer `videoMuted` preference: muting one updates that preference, and the next video or reopened window applies it without changing the element's volume. Main validates the Save and image before creating a window, closes auxiliary windows during Library transitions and shutdown. The older `preview.pin`, `preview.configure`, and `preview.neighbor` command names remain removed rather than becoming an undocumented compatibility surface.
 
-The renderer save pool lives under `features/saves/state/`. Library state owns navigation, folders, and saved views. Library may compose Saves, but Save modules cannot import Library modules. App-level bridges expose the narrow Library actions needed by Save menus and viewers. Tag operations live under `features/tags/operations/`; both the library Tags page and settings consume that feature. Shared UI primitives remain in `packages/ui`, independent of desktop stores.
+The renderer save pool lives under `features/saves/state/`. It is bounded: once a write takes it past 5,000 rows, a deferred trim evicts the least recently touched rows down to 4,000, skipping rows that are selected, in the current results, recent, or held by a mounted reader through `useSave`, `useRetainedSaves`, or `protectSaves`. Readers re-hydrate an evicted row through `ensureSaves`. Library state owns navigation, folders, and saved views. Library may compose Saves, but Save modules cannot import Library modules. App-level bridges expose the narrow Library actions needed by Save menus and viewers. Tag operations live under `features/tags/operations/`; both the library Tags page and settings consume that feature. Shared UI primitives remain in `packages/ui`, independent of desktop stores.
 
 Agent chrome lives in `@pond/ui` as Pond-owned compounds (`Thread`, `Composer`, `Message`, Markdown, ToolCall, Prompt, Reasoning). They take props from `useChat` and do not wrap Assistant UI primitives. Feature-specific widgets (consulted saves, review, model picker) stay in the desktop pane. Renderer vendor chunks assign modules to their own packages without recursively absorbing dependencies.
 
@@ -129,6 +129,10 @@ the lease token plus cancellation fence as a compare-and-set guard. Source
 budgets, breaker state, generation state, and attempt history are durable.
 Downloads, the sidebar, and the tray project that shared state through typed
 queries. They never infer queue truth from renderer activity.
+`queue.sourceGates` lists every source that holds work back, including a
+closed gate whose hourly or daily request budget is spent, with that source's
+caps. Downloads combines it with each Save's task state, deferral reason, and
+recorded error class to explain a status in plain language.
 
 Retry batches can contain failed Saves and Saves that are still ingesting.
 A failed Save stays failed until a worker claims its next task. The orphan
@@ -146,7 +150,8 @@ The main process remains the sole database settlement authority. A small
 `utilityProcess` pool runs validated Node-compatible image processing, image
 probing, and poster extraction jobs. Each request and response carries its task
 lease token and cancellation fence. Worker timeout, exit, or malformed output
-fails the attempt in main, where the normal retry policy applies. Browser
+fails the attempt in main, where the normal retry policy applies. A worker
+with no job for thirty seconds exits, and the next job starts a new one. Browser
 session harvesting, page archives, tweet capture, text-card rendering, Library
 file writes, and every task-state transition remain main-owned. Library
 switches pause claims and drain accepted work before paths or database
@@ -180,7 +185,7 @@ Bulk selection mutations cross IPC as explicit IDs through `saves.bulkEdit`. Mai
 
 ## On-device processing resources
 
-Enrichment revalidates the current Save and enabled preference when a queued job starts. Processing preference changes rescan eligibility. The inference worker serializes requests, reuses one multimodal embedding bundle with shared text weights, and releases the worker after fifteen seconds without pending requests. Main reports macOS kernel memory pressure, or available-memory pressure on other platforms, through the existing machine-pacing bridge; inference yields under pressure and resumes automatically.
+Enrichment revalidates the current Save and enabled preference when a queued job starts. Processing preference changes rescan eligibility. The inference worker serializes requests, reuses one multimodal embedding bundle with shared text weights, and releases the worker after fifteen seconds without pending requests. Main loads its own text embedding model for search queries and classification labels, and disposes it after a minute without a request. Main reports macOS kernel memory pressure, or available-memory pressure on other platforms, through the existing machine-pacing bridge; inference yields under pressure and resumes automatically.
 
 `media.decodeAudio` is an internal, validated IPC operation for files in the active Library. Main runs bounded FFmpeg extraction and returns at most thirty seconds of mono 16 kHz PCM. It never reads a complete video into the renderer to obtain that segment. Full transcription retains its existing complete-recording behaviour and byte limit, enforced during the response stream. Video sampling uses one decoder for the first thirty-two seconds. Video inference retains every sampled frame and aggregates frame-count-weighted batches of at most sixteen; the media preprocessing version distinguishes these derived vectors from earlier whole-video embeddings.
 
@@ -189,5 +194,7 @@ Enrichment revalidates the current Save and enabled preference when a queued job
 ## Auxiliary window composition
 
 Settings has a dedicated renderer and scoped preload. Its singleton native window reuses the section registry, search and provider UI without booting Library selection, ingestion or enrichment effects. Main broadcasts committed preferences to every renderer; Settings delegates Processing rescans to the Library rather than starting a second enrichment loop. Settings deep links and native commands select the same window, while app activation explicitly creates or focuses the Library.
+
+With Keep Running When Closed on and a tray icon present, closing the Library hides it. After 60 seconds hidden, main destroys the window so its renderer exits, while fetching and sync continue in main. The release waits while a preview window is open, and never runs during quit or when Pond would quit without the window. Every reopen path rebuilds the window through `openLibraryWindow` with the persisted bounds and last route. Preload buffers navigation, menu commands and dropped files until the new renderer subscribes.
 
 Immediate folder assignments use deltas and notes/tag removal use main-owned bulk transactions with Undo.

@@ -154,7 +154,7 @@ export const viewerSection = defineCustomSection({
           control: "select",
           key: "thumbnailQuality",
           title: "Thumbnail Quality",
-          description: "Loads the original when enlarged.",
+          description: "Quality loads a sharper thumbnail on large cards.",
           options: [
             { value: "fast", label: "Fast" },
             { value: "balanced", label: "Balanced" },
@@ -201,7 +201,7 @@ export const viewerSection = defineCustomSection({
           control: "switch",
           key: "hoverVideo",
           title: "Hover Preview",
-          description: "Play and scrub thumbnails with the pointer.",
+          description: "Play the video while the pointer is over it.",
         },
         {
           control: "switch",
@@ -214,6 +214,18 @@ export const viewerSection = defineCustomSection({
           key: "loopShortVideos",
           title: "Loop Short Videos",
           description: "Repeat clips shorter than 30 seconds.",
+        },
+        {
+          control: "select",
+          key: "videoSeekSeconds",
+          title: "Seek Interval",
+          description: "How far the arrow keys skip in a video.",
+          options: [
+            { value: 5, label: "5 Seconds" },
+            { value: 10, label: "10 Seconds" },
+            { value: 15, label: "15 Seconds" },
+            { value: 30, label: "30 Seconds" },
+          ],
         },
         {
           control: "select",

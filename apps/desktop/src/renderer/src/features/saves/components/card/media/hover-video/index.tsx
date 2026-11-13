@@ -9,6 +9,11 @@ import { useMachineMotionPaused } from "@/shared/lib/use-machine-motion";
 import { usePrefs } from "@/shared/state/prefs";
 import styles from "./styles.module.css";
 
+/** Grace after leave so a quick re-hover reuses the decoder instead of refetching. */
+const RELEASE_DELAY_MS = 400;
+/** A pointer passing over a card on its way elsewhere should not open a decoder. */
+const HOVER_DELAY_MS = 450;
+
 function seekToStart(el: HTMLVideoElement) {
   try {
     el.currentTime = 0;
@@ -42,8 +47,8 @@ export function HoverVideo({
   const motionPaused = useMachineMotionPaused();
   const hoverEnabled = prefs.hoverVideo !== false;
   const internalRef = useRef<HTMLVideoElement | null>(null);
-  const seekRatio = useRef(0);
-  const seekFrame = useRef(0);
+  const releaseTimer = useRef<number | undefined>(undefined);
+  const hoverTimer = useRef<number | undefined>(undefined);
   const [hoverPrimed, setHoverPrimed] = useState(false);
   const [active, setActive] = useState(false);
   const [videoReady, setVideoReady] = useState(false);
@@ -97,22 +102,50 @@ export function HoverVideo({
       document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("blur", pause);
       window.removeEventListener("focus", onVisibility);
-      if (seekFrame.current) {
-        cancelAnimationFrame(seekFrame.current);
-        seekFrame.current = 0;
-      }
       pause();
     };
   }, [active, primed, hoverEnabled, motionPaused]);
 
-  const onEnter = useCallback(() => {
+  useEffect(() => {
+    if (primed) return;
+    const el = internalRef.current;
+    if (!el || el.networkState === HTMLMediaElement.NETWORK_EMPTY) return;
+    /** Dropping src alone keeps the decoder and buffers; load() with no source frees them. */
+    el.removeAttribute("src");
+    el.load();
+    setVideoReady(false);
+  }, [primed]);
+
+  useEffect(
+    () => () => {
+      window.clearTimeout(releaseTimer.current);
+      window.clearTimeout(hoverTimer.current);
+    },
+    [],
+  );
+
+  const activate = useCallback(() => {
     if (!hoverEnabled || document.body.dataset.saveDragging) return;
+    window.clearTimeout(releaseTimer.current);
     setActive(true);
     setHoverPrimed(true);
   }, [hoverEnabled]);
 
+  const onPointerEnter = useCallback(() => {
+    if (!hoverEnabled) return;
+    window.clearTimeout(releaseTimer.current);
+    window.clearTimeout(hoverTimer.current);
+    hoverTimer.current = window.setTimeout(activate, HOVER_DELAY_MS);
+  }, [activate, hoverEnabled]);
+
   const onLeave = useCallback(() => {
+    window.clearTimeout(hoverTimer.current);
     setActive(false);
+    window.clearTimeout(releaseTimer.current);
+    releaseTimer.current = window.setTimeout(
+      () => setHoverPrimed(false),
+      RELEASE_DELAY_MS,
+    );
     const el = internalRef.current;
     if (!el) return;
     el.pause();
@@ -179,30 +212,9 @@ export function HoverVideo({
         data-ready={videoReady ? "true" : undefined}
         data-resting={needsRestingVideo && videoReady ? "true" : undefined}
         aria-label={label}
-        onMouseEnter={onEnter}
+        onMouseEnter={onPointerEnter}
         onMouseLeave={onLeave}
-        onMouseMove={(event) => {
-          if (!hoverEnabled || document.body.dataset.saveDragging) return;
-          const rect = event.currentTarget.getBoundingClientRect();
-          if (rect.width === 0) return;
-          seekRatio.current = Math.min(
-            1,
-            Math.max(0, (event.clientX - rect.left) / rect.width),
-          );
-          if (seekFrame.current) return;
-          seekFrame.current = requestAnimationFrame(() => {
-            seekFrame.current = 0;
-            const el = internalRef.current;
-            if (!el || !Number.isFinite(el.duration) || el.duration <= 0)
-              return;
-            const next = seekRatio.current * el.duration;
-            if (Math.abs(el.currentTime - next) < 0.04) return;
-            try {
-              el.currentTime = next;
-            } catch {}
-          });
-        }}
-        onFocus={onEnter}
+        onFocus={activate}
         onBlur={onLeave}
         onError={onBroken}
         onLoadedMetadata={onLoadedMetadata}

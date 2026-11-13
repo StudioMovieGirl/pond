@@ -7,6 +7,7 @@ export { CardThumb } from "./components/card/media";
 export { Card } from "./components/card/parts";
 export { SaveTile } from "./components/card/tile";
 export type { LibraryCardView } from "./components/card/types";
+export { SaveCollectionContextMenu } from "./components/context-menu";
 export {
   FolderMenu,
   type FolderMenuItem,
@@ -38,6 +39,7 @@ export {
   pasteImportOf,
   runPasteImport,
 } from "./lib/paste-import";
+export { type PreviewStepBinding, previewStepRuns } from "./lib/preview-step";
 export { normalise } from "./lib/reconcile";
 export {
   clearSaveSelection,
@@ -66,6 +68,7 @@ export {
 export { isTextOnlySave } from "./lib/text";
 export { asUrlList } from "./lib/url-list";
 export { previewFileIndex, runViewerAction } from "./lib/viewer-actions";
+export { activeVideoShown } from "./state/active-video";
 export {
   type DisplayPrefKey,
   type DisplayPrefs,

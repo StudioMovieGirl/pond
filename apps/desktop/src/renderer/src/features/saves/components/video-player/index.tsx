@@ -1,5 +1,7 @@
-import { Tooltip, Video } from "@pond/ui";
+import { IconMediaPlay } from "@pond/icons";
+import { Tooltip, useVideo, Video } from "@pond/ui";
 import {
+  type MouseEvent,
   type ReactEventHandler,
   type ReactNode,
   useCallback,
@@ -20,6 +22,7 @@ import type { ChapterCue } from "@/features/saves/lib/media/chapters-vtt";
 import { buildPondUrl } from "@/features/saves/lib/media/url";
 import { viewerMemory } from "@/features/saves/lib/viewer-memory";
 import { cardThumbnailFor } from "@/features/saves/state/card-thumbnails";
+import { usePrefs } from "@/shared/state/prefs";
 import { videoScaleForRotation } from "./geometry";
 import { MediaBridge } from "./media-bridge";
 import { Poster } from "./poster";
@@ -31,6 +34,10 @@ import { useChaptersTrackUrl } from "./use-chapters-track-url";
 import { useFirstFrame } from "./use-first-frame";
 import { VolumeControl } from "./volume";
 import { WheelBridge } from "./wheel-bridge";
+
+/** Drawn over the frame. A click on one belongs to that control, not playback. */
+const SURFACE_CONTROLS =
+  "button, a, input, select, textarea, label, [role='button'], [role='slider'], [role='menuitem'], [role='option'], [role='combobox']";
 
 interface VideoPlayerProps {
   src: string;
@@ -48,9 +55,37 @@ interface VideoPlayerProps {
   renderToolbar?: (slots: VideoToolbarSlots) => ReactNode;
 }
 
+/**
+ * The icon follows `state.playing`. Autoplay starts on the next frame, so the
+ * icon stays hidden until that play when autoplay is on, and shows immediately
+ * when a preview opens already paused.
+ */
+function PlayIndicator({ active, src }: { active: boolean; src: string }) {
+  const { state } = useVideo();
+  const [viewer] = usePrefs("viewer");
+  const played = useRef({ src, started: false });
+  if (played.current.src !== src) played.current = { src, started: false };
+  if (state.playing) played.current.started = true;
+  if (!active) return null;
+  const visible =
+    !state.playing &&
+    (played.current.started || state.ended || viewer.autoplayVideo === false);
+  return (
+    <div
+      className={styles.indicator}
+      data-play-indicator=""
+      data-paused={visible || undefined}
+      aria-hidden
+    >
+      <IconMediaPlay />
+    </div>
+  );
+}
+
 /** Fits the video and its posters into one box so the open and close transitions morph the visible frame, not the letterboxed stage. */
 function VideoSurface({
   src,
+  active,
   trackUrl,
   subtitleUrl,
   rotation,
@@ -62,6 +97,7 @@ function VideoSurface({
   children,
 }: {
   src: string;
+  active: boolean;
   trackUrl: string | null;
   subtitleUrl: string | null;
   rotation: number;
@@ -72,6 +108,7 @@ function VideoSurface({
   onLoadedMetadata: ReactEventHandler<HTMLVideoElement>;
   children?: ReactNode;
 }) {
+  const { actions } = useVideo();
   const frame = useRef<HTMLDivElement>(null);
   const shown = useMediaReveal(useFirstFrame(src), src);
   const [viewerSize, setViewerSize] = useState({ width: 0, height: 0 });
@@ -107,10 +144,25 @@ function VideoSurface({
     ratio && viewerSize.width && viewerSize.height
       ? containImage({ left: 0, top: 0, ...viewerSize }, ratio)
       : null;
+  /**
+   * Toolbar, timeline, and other overlays sit outside the media element, so
+   * a click on them does not bubble here. Portal clicks do bubble to
+   * `Video.Root`, which is why the handler is not on the root.
+   */
+  const onSurfaceClick = (event: MouseEvent<HTMLVideoElement>) => {
+    if (event.button !== 0 || event.defaultPrevented) return;
+    const { target } = event;
+    if (!(target instanceof Element) || target.closest(SURFACE_CONTROLS)) {
+      return;
+    }
+    actions.togglePlay();
+  };
+
   return (
     <div
       ref={frame}
       className={styles.frame}
+      data-toggle={active || undefined}
       style={
         fitted
           ? {
@@ -128,6 +180,7 @@ function VideoSurface({
         data-pending={!shown || undefined}
         src={src}
         preload="metadata"
+        onClick={active ? onSurfaceClick : undefined}
         onError={onError}
         onLoadedMetadata={onLoadedMetadata}
         style={{
@@ -143,6 +196,7 @@ function VideoSurface({
         ) : null}
       </Video.Media>
       {children}
+      <PlayIndicator active={active} src={src} />
     </div>
   );
 }
@@ -163,6 +217,7 @@ export function VideoPlayer({
   renderToolbar,
 }: VideoPlayerProps) {
   const save = useSave(saveId);
+  const [viewer] = usePrefs("viewer");
   const chromeRoot = useViewerChromeRoot();
   const trackUrl = useChaptersTrackUrl(chapters);
   const subtitle = save?.files.find((file) => file.kind === "subtitle");
@@ -225,7 +280,12 @@ export function VideoPlayer({
   );
 
   return (
-    <Video.Root frameRate={frameRate} fullscreenTarget={chromeRoot} chrome>
+    <Video.Root
+      frameRate={frameRate}
+      fullscreenTarget={chromeRoot}
+      initialMuted={viewer.videoMuted}
+      chrome
+    >
       <MediaBridge
         key={src}
         src={src}
@@ -239,6 +299,7 @@ export function VideoPlayer({
       <WheelBridge />
       <VideoSurface
         src={src}
+        active={!!active}
         trackUrl={trackUrl}
         subtitleUrl={subtitleUrl}
         rotation={rotation}
