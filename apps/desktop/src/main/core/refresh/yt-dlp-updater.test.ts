@@ -93,6 +93,7 @@ describe("ytDlpAsset", () => {
     ["darwin", "arm64", "yt-dlp_macos"],
     ["darwin", "x64", "yt-dlp_macos"],
     ["linux", "x64", "yt-dlp_linux"],
+    ["linux", "arm64", "yt-dlp_linux_aarch64"],
     ["freebsd", "x64", undefined],
   ];
   it.each(cases)("%s %s -> %s", (platform, arch, expected) => {

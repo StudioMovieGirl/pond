@@ -39,14 +39,15 @@ const RETRYABLE_RENAME_CODES = new Set(["EBUSY", "EPERM", "EACCES"]);
 
 /**
  * Release asset for a platform and architecture, or undefined when yt-dlp does
- * not publish one we support. Windows ships separate x64 and arm64 builds.
+ * not publish one we support. Linux and Windows ship separate arm64 builds.
  */
 export function ytDlpAsset(
   platform: NodeJS.Platform,
   arch: string,
 ): string | undefined {
   if (platform === "darwin") return "yt-dlp_macos";
-  if (platform === "linux") return "yt-dlp_linux";
+  if (platform === "linux")
+    return arch === "arm64" ? "yt-dlp_linux_aarch64" : "yt-dlp_linux";
   if (platform === "win32") {
     if (arch === "x64") return "yt-dlp.exe";
     if (arch === "arm64") return "yt-dlp_arm64.exe";
