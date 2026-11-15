@@ -3,9 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { Save } from "@pond/schema/db";
+import { THUMBNAIL_DARK_KIND, THUMBNAIL_KIND } from "@shared/save-file-names";
 import { isWebPageSave } from "@shared/web-page-save";
 import type { WebContents } from "electron";
 import log from "electron-log/main.js";
+import sharp from "sharp";
 import { z } from "zod";
 import type { TransferOptions } from "../../../lib/download-transfer";
 import { saveFile } from "../../../paths";
@@ -20,6 +22,7 @@ import {
   type ImportableCookie,
   writePartitionCookies,
 } from "../../refresh/harvest-window/session";
+import { screenshotPage } from "../../refresh/web-page-renderer";
 import { readLibraryMedia } from "../../storage/library-media-storage";
 import { TransientError } from "../extractors/errors";
 import {
@@ -99,6 +102,11 @@ interface ArchivePageRuntime {
     },
   ) => Promise<CrawlResult>;
   persistArchive: (saveId: string, files: WriteFileArgs[]) => Promise<void>;
+  writePageCover: (
+    saveId: string,
+    rootUrl: URL,
+    signal: AbortSignal,
+  ) => Promise<void>;
 }
 
 async function autoArchiveFromPrefs(): Promise<boolean> {
@@ -120,12 +128,61 @@ async function persistArchive(
   );
 }
 
+/**
+ * Writes a viewport screenshot of the page as the save's cover (a `thumbnail`
+ * file). The cover is captured on the automatic pass regardless of the
+ * auto-archive toggle, so a web-page save always shows the page itself instead
+ * of the site's og:image. Marked `custom` so Pond never replaces it with a
+ * re-derived og:image thumbnail.
+ */
+async function writePageCover(
+  saveId: string,
+  rootUrl: URL,
+  signal: AbortSignal,
+): Promise<void> {
+  const shot = await screenshotPage(rootUrl.href, signal);
+  if (!shot.ok) {
+    log.debug("[pond pipeline:archive-page] page cover skipped", {
+      saveId,
+      reason: shot.reason,
+    });
+    return;
+  }
+  const webp = await sharp(Buffer.from(shot.png))
+    .webp({ quality: 82 })
+    .toBuffer();
+  await persistSave(
+    saveId,
+    {},
+    {
+      actorReason: "pipeline:archive-page:cover",
+      replaceFilesWithKind: [THUMBNAIL_KIND, THUMBNAIL_DARK_KIND],
+      newFiles: [
+        {
+          kind: THUMBNAIL_KIND,
+          filename: "page-cover.webp",
+          bytes: webp,
+          mimeType: "image/webp",
+          width: shot.width,
+          height: shot.height,
+          custom: true,
+        },
+      ],
+    },
+  );
+  log.debug("[pond pipeline:archive-page] page cover written", {
+    saveId,
+    bytes: webp.byteLength,
+  });
+}
+
 function defaultArchiveRuntime(): ArchivePageRuntime {
   return {
     readSave,
     autoArchive: autoArchiveFromPrefs,
     crawlSite,
     persistArchive,
+    writePageCover,
   };
 }
 
@@ -159,10 +216,14 @@ export async function runArchivePage(
     return;
   }
 
-  if (scope !== "site" && !(await runtime.autoArchive())) {
-    log.debug("[pond pipeline:archive-page] automatic archive off, skipping", {
-      saveId,
-    });
+  let rootUrl: URL;
+  try {
+    rootUrl = new URL(save.url);
+  } catch {
+    dropPageCookies(saveId);
+    return;
+  }
+  if (rootUrl.protocol !== "http:" && rootUrl.protocol !== "https:") {
     dropPageCookies(saveId);
     return;
   }
@@ -184,14 +245,23 @@ export async function runArchivePage(
     }
   }
 
-  let rootUrl: URL;
-  try {
-    rootUrl = new URL(save.url);
-  } catch {
-    dropPageCookies(saveId);
-    return;
+  // A web-page save shows the page itself as its cover. The capture is cheap
+  // and runs even when automatic archiving is off, so the card always shows a
+  // real screenshot of the page instead of the site's og:image. It runs only
+  // on the automatic ("page") pass; a manual site crawl inherits that cover.
+  if (scope === "page") {
+    await runtime.writePageCover(saveId, rootUrl, ctx.signal).catch((err) => {
+      log.debug("[pond pipeline:archive-page] page cover capture failed", {
+        saveId,
+        err,
+      });
+    });
   }
-  if (rootUrl.protocol !== "http:" && rootUrl.protocol !== "https:") {
+
+  if (scope !== "site" && !(await runtime.autoArchive())) {
+    log.debug("[pond pipeline:archive-page] automatic archive off, skipping", {
+      saveId,
+    });
     dropPageCookies(saveId);
     return;
   }

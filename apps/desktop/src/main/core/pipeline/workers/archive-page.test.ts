@@ -44,7 +44,35 @@ function setup(
       ];
     },
   );
-  return { save, readSave, autoArchivePages, crawlSite, persistArchive };
+  const writePageCover = vi.fn(
+    async (_saveId: string, _rootUrl: URL, _signal: AbortSignal) => {
+      save.files = [
+        ...save.files,
+        {
+          kind: "thumbnail",
+          path: "page-cover.webp",
+          sha256: "cover",
+          size: 128,
+        },
+      ];
+    },
+  );
+  const runtime = {
+    readSave,
+    autoArchive: autoArchivePages,
+    crawlSite,
+    persistArchive,
+    writePageCover,
+  };
+  return {
+    save,
+    readSave,
+    autoArchivePages,
+    crawlSite,
+    persistArchive,
+    writePageCover,
+    runtime,
+  };
 }
 
 const ctx = { signal: new AbortController().signal };
@@ -62,22 +90,38 @@ describe("archive_page automatic archive", () => {
     ).toBe(false);
   });
 
-  it("writes an archive and keeps the title, description, and preview when archiving is on", async () => {
-    const { save, readSave, autoArchivePages, crawlSite, persistArchive } =
+  it("writes a cover and an archive when automatic archiving is on", async () => {
+    const { save, crawlSite, persistArchive, writePageCover, runtime } =
       setup(true);
 
-    await runArchivePage("save-1", {}, ctx, {
-      readSave,
-      autoArchive: autoArchivePages,
-      crawlSite,
-      persistArchive,
-    });
+    await runArchivePage("save-1", {}, ctx, runtime);
 
-    expect(autoArchivePages).toHaveBeenCalled();
+    expect(writePageCover).toHaveBeenCalledOnce();
     expect(crawlSite).toHaveBeenCalledOnce();
     expect(persistArchive).toHaveBeenCalledOnce();
     expect(hasWarcArchive(save.files)).toBe(true);
+    expect(save.files.map((file) => file.path)).toContain("page-cover.webp");
     expect(save.files.map((file) => file.path)).toContain("preview.jpg");
+  });
+
+  it("writes a cover even when automatic archiving is off", async () => {
+    const {
+      save,
+      autoArchivePages,
+      crawlSite,
+      persistArchive,
+      writePageCover,
+      runtime,
+    } = setup(false);
+
+    await runArchivePage("save-1", {}, ctx, runtime);
+
+    expect(autoArchivePages).toHaveBeenCalled();
+    expect(writePageCover).toHaveBeenCalledOnce();
+    expect(crawlSite).not.toHaveBeenCalled();
+    expect(persistArchive).not.toHaveBeenCalled();
+    expect(hasWarcArchive(save.files)).toBe(false);
+    expect(save.files.map((file) => file.path)).toContain("page-cover.webp");
     expect(save).toMatchObject({
       title: "Notes",
       description: "A short page",
@@ -85,8 +129,8 @@ describe("archive_page automatic archive", () => {
     });
   });
 
-  it("finishes the save without an archive when the page sits behind a login wall", async () => {
-    const { save, readSave, autoArchivePages, crawlSite, persistArchive } =
+  it("writes a cover before a login wall, and still finishes without an archive", async () => {
+    const { save, crawlSite, persistArchive, writePageCover, runtime } =
       setup(true);
     crawlSite.mockResolvedValueOnce({
       pages: [],
@@ -94,96 +138,48 @@ describe("archive_page automatic archive", () => {
       authWalled: true,
     });
 
-    await runArchivePage("save-1", {}, ctx, {
-      readSave,
-      autoArchive: autoArchivePages,
-      crawlSite,
-      persistArchive,
-    });
+    await runArchivePage("save-1", {}, ctx, runtime);
 
+    expect(writePageCover).toHaveBeenCalledOnce();
     expect(persistArchive).not.toHaveBeenCalled();
     expect(hasWarcArchive(save.files)).toBe(false);
-    expect(save.files).toEqual([preview]);
+    expect(save.files.map((file) => file.path)).toContain("page-cover.webp");
+    expect(save.files.map((file) => file.path)).toContain("preview.jpg");
   });
 
   it("retries when a crawl captures no page and no login wall explains it", async () => {
-    const { readSave, autoArchivePages, crawlSite, persistArchive } =
-      setup(true);
+    const { crawlSite, persistArchive, runtime } = setup(true);
     crawlSite.mockResolvedValueOnce({
       pages: [],
       warcBytes: Buffer.alloc(0),
       authWalled: false,
     });
 
-    await expect(
-      runArchivePage("save-1", {}, ctx, {
-        readSave,
-        autoArchive: autoArchivePages,
-        crawlSite,
-        persistArchive,
-      }),
-    ).rejects.toThrow("no pages captured");
+    await expect(runArchivePage("save-1", {}, ctx, runtime)).rejects.toThrow(
+      "no pages captured",
+    );
     expect(persistArchive).not.toHaveBeenCalled();
-  });
-
-  it("keeps metadata only and writes no archive when automatic archiving is off", async () => {
-    const { save, readSave, autoArchivePages, crawlSite, persistArchive } =
-      setup(false);
-
-    await runArchivePage("save-1", {}, ctx, {
-      readSave,
-      autoArchive: autoArchivePages,
-      crawlSite,
-      persistArchive,
-    });
-
-    expect(autoArchivePages).toHaveBeenCalled();
-    expect(crawlSite).not.toHaveBeenCalled();
-    expect(persistArchive).not.toHaveBeenCalled();
-    expect(hasWarcArchive(save.files)).toBe(false);
-    expect(save.files).toEqual([preview]);
-    expect(save).toMatchObject({
-      title: "Notes",
-      description: "A short page",
-      mediaUrl: "https://example.com/preview.jpg",
-    });
   });
 
   it("still archives a site when asked, with automatic archiving off", async () => {
-    const { save, readSave, autoArchivePages, crawlSite, persistArchive } =
-      setup(false);
+    const { save, crawlSite, persistArchive, runtime } = setup(false);
 
-    await runArchivePage("save-1", { scope: "site" }, ctx, {
-      readSave,
-      autoArchive: autoArchivePages,
-      crawlSite,
-      persistArchive,
-    });
+    await runArchivePage("save-1", { scope: "site" }, ctx, runtime);
 
     expect(crawlSite).toHaveBeenCalledOnce();
+    expect(persistArchive).toHaveBeenCalledOnce();
     expect(hasWarcArchive(save.files)).toBe(true);
-    expect(save).toMatchObject({
-      title: "Notes",
-      description: "A short page",
-      mediaUrl: "https://example.com/preview.jpg",
-    });
   });
 });
 
 describe("archive_page for Are.na saves", () => {
   it("archives the page an Are.na Link block points at", async () => {
-    const { save, readSave, autoArchivePages, crawlSite, persistArchive } =
-      setup(true, {
-        source: "arena",
-        url: "https://en.wikipedia.org/wiki/Community_Memory",
-      });
-
-    await runArchivePage("save-1", {}, ctx, {
-      readSave,
-      autoArchive: autoArchivePages,
-      crawlSite,
-      persistArchive,
+    const { save, crawlSite, runtime } = setup(true, {
+      source: "arena",
+      url: "https://en.wikipedia.org/wiki/Community_Memory",
     });
+
+    await runArchivePage("save-1", {}, ctx, runtime);
 
     expect(
       crawlSite.mock.calls.map(([rootUrl, scope]) => [rootUrl.href, scope]),
@@ -192,17 +188,15 @@ describe("archive_page for Are.na saves", () => {
   });
 
   it("leaves Are.na blocks that still point at are.na alone", async () => {
-    const { save, readSave, autoArchivePages, crawlSite, persistArchive } =
-      setup(true, { source: "arena", url: "https://www.are.na/block/9613792" });
-
-    await runArchivePage("save-1", { scope: "site" }, ctx, {
-      readSave,
-      autoArchive: autoArchivePages,
-      crawlSite,
-      persistArchive,
+    const { save, crawlSite, persistArchive, runtime } = setup(true, {
+      source: "arena",
+      url: "https://www.are.na/block/9613792",
     });
 
+    await runArchivePage("save-1", { scope: "site" }, ctx, runtime);
+
     expect(crawlSite).not.toHaveBeenCalled();
+    expect(persistArchive).not.toHaveBeenCalled();
     expect(hasWarcArchive(save.files)).toBe(false);
   });
 });

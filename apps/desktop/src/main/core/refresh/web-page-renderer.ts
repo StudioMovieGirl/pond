@@ -47,3 +47,45 @@ export async function renderPageHtml(
     lease.release();
   }
 }
+
+const CAPTURE_SETTLE_MS = 2_500;
+const CAPTURE_TIMEOUT_MS = 15_000;
+
+export type PageScreenshot =
+  | { ok: true; png: Uint8Array; width: number; height: number }
+  | { ok: false; reason: "navigation" | "destroyed" | "capture" };
+
+/**
+ * Renders a page in the shared hidden "web" window and captures its viewport
+ * as a PNG. Used as the cover image for web-page saves so the card shows the
+ * page itself instead of the site's og:image. Fails soft (never throws) so a
+ * flaky capture can't strand an otherwise good save.
+ */
+export async function screenshotPage(
+  url: string,
+  signal?: AbortSignal,
+): Promise<PageScreenshot> {
+  const lease = await leaseWindow("web", { signal });
+  try {
+    const webContents = lease.win.webContents;
+    const loaded = await navigateWithTimeout(lease.win, url, NAV_TIMEOUT_MS);
+    if (!loaded) return { ok: false, reason: "navigation" };
+    await sleep(CAPTURE_SETTLE_MS);
+    if (lease.win.isDestroyed() || webContents.isDestroyed()) {
+      return { ok: false, reason: "destroyed" };
+    }
+    const image = await Promise.race([
+      webContents.capturePage(),
+      sleep(CAPTURE_TIMEOUT_MS).then(() => null),
+    ]);
+    if (image === null || image.isEmpty()) {
+      return { ok: false, reason: "capture" };
+    }
+    const { width, height } = image.getSize();
+    return { ok: true, png: image.toPNG(), width, height };
+  } catch {
+    return { ok: false, reason: "capture" };
+  } finally {
+    lease.release();
+  }
+}
