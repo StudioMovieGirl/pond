@@ -30,6 +30,7 @@ import {
 } from "./library-location-paths";
 import {
   relaunchSoon,
+  repointInPlace,
   resumeLibraryWork,
   suspendLibraryWork,
 } from "./library-location-runtime";
@@ -98,7 +99,15 @@ export const libraryLocationMaintenanceQueries = {
           });
           await relocateLibrary(renamed.path, "adopt");
           renameRecentLibrary(recentLibrariesFile(), source, renamed.path);
-          await relaunchSoon();
+          try {
+            await repointInPlace();
+          } catch (repointError) {
+            log.warn(
+              "[pond library-ops] soft re-point after rename failed, relaunching",
+              repointError,
+            );
+            await relaunchSoon();
+          }
           return { ok: true as const, path: renamed.path };
         } catch (error) {
           await rollbackLibraryRename(

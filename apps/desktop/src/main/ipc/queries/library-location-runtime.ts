@@ -70,7 +70,7 @@ export function waitForLibraryLocationChanges(): Promise<void> {
 
 export async function relaunchSoon(): Promise<void> {
   if (process.env.ELECTRON_RENDERER_URL) {
-    await softRepointInDev();
+    await repointInPlace();
     return;
   }
   relaunchPending = true;
@@ -81,8 +81,13 @@ export async function relaunchSoon(): Promise<void> {
   }, 150);
 }
 
-async function softRepointInDev(): Promise<void> {
-  log.info("[pond library-ops] dev re-point into new library (no relaunch)");
+/**
+ * Re-point the running app into a relocated or renamed Library without
+ * quitting: reopen the index against the new paths, restart the work that was
+ * suspended for the move, and reload open windows in place.
+ */
+export async function repointInPlace(): Promise<void> {
+  log.info("[pond library-ops] soft re-point into new library (no relaunch)");
   await flushTagsDump().catch((err) =>
     log.warn("[pond library-ops] tags.json flush failed", err),
   );
